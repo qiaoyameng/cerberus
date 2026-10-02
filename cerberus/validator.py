@@ -102,6 +102,10 @@ class BareValidator(object):
     :type error_handler: class or instance based on
                          :class:`~cerberus.errors.BaseErrorHandler` or
                          :class:`tuple`
+    :param simultaneous_renaming: See
+        :attr:`~cerberus.Validator.simultaneous_renaming`.
+        Defaults to ``False``.
+    :type simultaneous_renaming: :class:`bool`
     """  # noqa: E501
 
     mandatory_validations = ('nullable',)
@@ -146,7 +150,8 @@ class BareValidator(object):
         __init__(self, schema=None, ignore_none_values=False,
                  allow_unknown=False, require_all=False,
                  purge_unknown=False, purge_readonly=False,
-                 error_handler=errors.BasicErrorHandler)
+                 error_handler=errors.BasicErrorHandler,
+                 simultaneous_renaming=False)
         """
 
         self.document = None
@@ -215,6 +220,8 @@ class BareValidator(object):
             'require_all',
             'purge_unknown',
             'purge_readonly',
+            'error_handler',
+            'simultaneous_renaming',
         )
         for i, p in enumerate(signature[: len(args)]):
             if p in kwargs:
@@ -293,9 +300,8 @@ class BareValidator(object):
             if not rule:
                 constraint = None
             else:
-                rules_set = self._resolve_rules_set(
-                    self._resolve_schema(self.schema)[field]
-                )
+                schema = self._resolve_schema(self.schema) or {}
+                rules_set = self._resolve_rules_set(schema.get(field, {}))
                 if rule == 'nullable':
                     constraint = rules_set.get(rule, False)
                 elif rule == 'required':
@@ -303,7 +309,7 @@ class BareValidator(object):
                     if rule not in rules_set:
                         schema_path = "__require_all__"
                 else:
-                    constraint = rules_set[rule]
+                    constraint = rules_set.get(rule)
 
             value = self.document.get(field)
 
@@ -532,6 +538,19 @@ class BareValidator(object):
         self._config['purge_readonly'] = value
 
     @property
+    def simultaneous_renaming(self):
+        """
+        If ``True``, renames for one mapping are planned from the original document and
+        applied simultaneously.
+        Type: :class:`bool`
+        """
+        return self._config.get('simultaneous_renaming', False)
+
+    @simultaneous_renaming.setter
+    def simultaneous_renaming(self, value):
+        self._config['simultaneous_renaming'] = value
+
+    @property
     def root_allow_unknown(self):
         """
         The :attr:`~cerberus.Validator.allow_unknown` attribute of the first level
@@ -694,7 +713,10 @@ class BareValidator(object):
         for field in schema:
             schema[field] = self._resolve_rules_set(schema[field])
 
-        self.__normalize_rename_fields(mapping, schema)
+        if self.simultaneous_renaming:
+            self._rename_fields_simultaneously(mapping, schema)
+        else:
+            self.__normalize_rename_fields(mapping, schema)
         if self.purge_unknown and not self.allow_unknown:
             self._normalize_purge_unknown(mapping, schema)
         if self.purge_readonly:
@@ -910,6 +932,87 @@ class BareValidator(object):
                     mapping, {field: self.allow_unknown}, field
                 )
         return mapping
+
+    def _rename_fields_simultaneously(self, mapping, schema):
+        destinations = {}
+
+        for field in tuple(mapping):
+            if field in schema:
+                rules = schema[field]
+            elif (
+                isinstance(self.allow_unknown, Mapping)
+                and 'rename_handler' in self.allow_unknown
+            ):
+                rules = self.allow_unknown
+            else:
+                continue
+
+            destinations[field] = self._get_simultaneous_rename_destination(
+                rules, field
+            )
+
+        conflicts = self._get_rename_conflicts(mapping, destinations)
+        if conflicts:
+            for destination in sorted(conflicts, key=repr):
+                sources = conflicts[destination]
+                self._error(
+                    sources[0],
+                    errors.RENAMING_CONFLICT,
+                    tuple(sorted(sources, key=repr)),
+                )
+                self.recent_error.constraint = destination
+            return mapping
+
+        renamed = {
+            source: mapping[source]
+            for source, destination in destinations.items()
+            if destination != source
+        }
+
+        for source in renamed:
+            del mapping[source]
+        for source, value in renamed.items():
+            mapping[destinations[source]] = value
+
+        return mapping
+
+    def _get_simultaneous_rename_destination(self, rules, field):
+        destination = rules.get('rename', field)
+
+        if 'rename_handler' not in rules:
+            return destination
+
+        error_count = len(self._errors)
+        handled_destination = self.__normalize_coerce(
+            rules['rename_handler'], field, field, False, errors.RENAMING_FAILED
+        )
+
+        if len(self._errors) == error_count:
+            try:
+                hash(handled_destination)
+            except TypeError as error:
+                self._error(field, errors.RENAMING_FAILED, str(error))
+            else:
+                return handled_destination
+
+        return field
+
+    @staticmethod
+    def _get_rename_conflicts(mapping, destinations):
+        groups = {}
+        for source, destination in destinations.items():
+            if destination != source:
+                groups.setdefault(destination, []).append(source)
+
+        return {
+            destination: sorted(sources, key=repr)
+            for destination, sources in groups.items()
+            if len(sources) > 1
+            or (
+                destination in mapping
+                and destinations.get(destination, destination) == destination
+            )
+        }
 
     def _normalize_rename(self, mapping, schema, field):
         """{'type': 'hashable'}"""

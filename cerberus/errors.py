@@ -62,6 +62,7 @@ COERCION_FAILED = ErrorDefinition(0x61, 'coerce')
 RENAMING_FAILED = ErrorDefinition(0x62, 'rename_handler')
 READONLY_FIELD = ErrorDefinition(0x63, 'readonly')
 SETTING_DEFAULT_FAILED = ErrorDefinition(0x64, 'default_setter')
+RENAMING_CONFLICT = ErrorDefinition(0x65, None)
 
 # groups
 ERROR_GROUP = ErrorDefinition(0x80, None)
@@ -493,6 +494,7 @@ class BasicErrorHandler(BaseErrorHandler):
         0x62: "field '{field}' cannot be renamed: {0}",
         0x63: "field is read-only",
         0x64: "default value for '{field}' cannot be set: {0}",
+        0x65: "fields {0} cannot be renamed to field '{constraint}'",
         0x81: "mapping doesn't validate subschema: {0}",
         0x82: "one or more sequence-items don't validate: {0}",
         0x83: "one or more keys of a mapping  don't validate: {0}",
@@ -546,8 +548,19 @@ class BasicErrorHandler(BaseErrorHandler):
         self.clear()
 
     def _format_message(self, field, error):
+        info = error.info
+        if error.code == RENAMING_CONFLICT.code:
+            source_fields = ', '.join(repr(value) for value in info[0])
+            noun = 'field' if len(info[0]) == 1 else 'fields'
+            message = self.messages[error.code].replace('fields', noun, 1)
+            return message.format(
+                source_fields,
+                constraint=error.constraint,
+                field=field,
+                value=error.value,
+            )
         return self.messages[error.code].format(
-            *error.info, constraint=error.constraint, field=field, value=error.value
+            *info, constraint=error.constraint, field=field, value=error.value
         )
 
     def _insert_error(self, path, node):

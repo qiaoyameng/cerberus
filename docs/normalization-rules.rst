@@ -37,6 +37,23 @@ is processed through that chain.
    >>> v.normalized({1: 'foo'})
    {'01': 'foo'}
 
+By default, renames are applied while iterating over the fields. Pass
+``simultaneous_renaming=True`` to plan a mapping's renames from its original
+state and apply them together. This allows fields to be swapped and chains or
+cycles to be renamed without intermediate states overwriting a value:
+
+.. doctest::
+
+   >>> schema = {'a': {'rename': 'b'}, 'b': {'rename': 'a'}}
+   >>> v = Validator(schema, simultaneous_renaming=True)
+   >>> v.normalized({'a': 1, 'b': 2})
+   {'b': 1, 'a': 2}
+
+When two source fields produce the same destination, including when the
+destination field already exists and is not moved, the mapping is not changed
+and an error reports the involved source fields. Each nested mapping is planned
+and applied independently.
+
 
 .. versionadded:: 1.0
 

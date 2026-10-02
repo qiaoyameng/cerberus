@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from copy import deepcopy
+from itertools import permutations
 from tempfile import NamedTemporaryFile
 
 from pytest import mark
@@ -206,6 +207,194 @@ def test_rename_handler():
     document = {'0': 'foo'}
     expected = {0: 'foo'}
     assert_normalized(document, expected, schema, validator)
+
+
+def normalization_result(document, schema, **kwargs):
+    validator = Validator(schema, **kwargs)
+    result = validator.normalized(deepcopy(document), always_return_document=True)
+    errors = tuple(
+        (
+            error.document_path,
+            error.code,
+            error.constraint,
+            error.info,
+        )
+        for error in validator._errors
+    )
+    return result, errors
+
+
+def test_simultaneous_rename_swap_is_order_independent():
+    schema = {'a': {'rename': 'b'}, 'b': {'rename': 'a'}}
+    document = {'a': 1, 'b': 2}
+    expected = {'a': 2, 'b': 1}
+
+    results = [
+        normalization_result(dict(items), schema, simultaneous_renaming=True)
+        for items in permutations(document.items())
+    ]
+
+    assert all(result == results[0][0] for result, _ in results[1:])
+    assert all(actual_errors == results[0][1] for _, actual_errors in results[1:])
+    assert results[0] == (expected, ())
+
+
+def test_simultaneous_rename_three_node_cycle_is_order_independent():
+    schema = {
+        'a': {'rename': 'b'},
+        'b': {'rename': 'c'},
+        'c': {'rename': 'a'},
+    }
+    document = {'a': 1, 'b': 2, 'c': 3}
+    expected = {'a': 3, 'b': 1, 'c': 2}
+
+    results = [
+        normalization_result(dict(items), schema, simultaneous_renaming=True)
+        for items in permutations(document.items())
+    ]
+
+    assert all(result == results[0][0] for result, _ in results[1:])
+    assert all(actual_errors == results[0][1] for _, actual_errors in results[1:])
+    assert results[0] == (expected, ())
+
+
+def test_simultaneous_rename_chain():
+    schema = {'a': {'rename': 'b'}, 'b': {'rename': 'c'}}
+    result, actual_errors = normalization_result(
+        {'a': 1, 'b': 2}, schema, simultaneous_renaming=True
+    )
+    assert result == {'b': 1, 'c': 2}
+    assert actual_errors == ()
+
+
+def test_simultaneous_rename_merge_is_order_independent():
+    schema = {'a': {'rename': 'c'}, 'b': {'rename': 'c'}}
+    document = {'a': 1, 'b': 2}
+
+    results = [
+        normalization_result(dict(items), schema, simultaneous_renaming=True)
+        for items in permutations(document.items())
+    ]
+
+    assert all(result == results[0][0] for result, _ in results[1:])
+    assert all(actual_errors == results[0][1] for _, actual_errors in results[1:])
+    result, actual_errors = results[0]
+    assert result == document
+    assert len(actual_errors) == 1
+    document_path, code, constraint, info = actual_errors[0]
+    assert document_path == ('a',)
+    assert code == errors.RENAMING_CONFLICT.code
+    assert constraint == 'c'
+    assert info == (('a', 'b'),)
+
+
+def test_simultaneous_rename_conflict_with_existing_target():
+    schema = {'a': {'rename': 'b'}, 'b': {}}
+    document = {'a': 1, 'b': 2}
+
+    result, actual_errors = normalization_result(
+        document, schema, simultaneous_renaming=True
+    )
+
+    assert result == document
+    assert len(actual_errors) == 1
+    assert actual_errors[0][1] == errors.RENAMING_CONFLICT.code
+    assert actual_errors[0][2] == 'b'
+    assert actual_errors[0][3] == (('a',),)
+
+
+def test_simultaneous_rename_conflict_with_existing_unknown_target():
+    schema = {'a': {'rename': 'b'}}
+    document = {'a': 1, 'b': 2}
+
+    result, actual_errors = normalization_result(
+        document, schema, simultaneous_renaming=True
+    )
+
+    assert result == document
+    assert len(actual_errors) == 1
+    assert actual_errors[0][0] == ('a',)
+    assert actual_errors[0][2] == 'b'
+    assert actual_errors[0][3] == (('a',),)
+
+
+def test_simultaneous_rename_handler_conflict_with_existing_target():
+    schema = {'a': {'rename_handler': lambda field: 'b'}, 'b': {}}
+
+    result, actual_errors = normalization_result(
+        {'a': 1, 'b': 2}, schema, simultaneous_renaming=True
+    )
+
+    assert result == {'a': 1, 'b': 2}
+    assert actual_errors[0][3] == (('a',),)
+
+
+def test_simultaneous_rename_handler_swap_for_unknown_fields():
+    result, actual_errors = normalization_result(
+        {'1': 1, '2': 2},
+        {},
+        allow_unknown={
+            'rename_handler': lambda field: {'1': '2', '2': '1'}[field]
+        },
+        simultaneous_renaming=True,
+    )
+
+    assert result == {'1': 2, '2': 1}
+    assert actual_errors == ()
+
+
+def test_simultaneous_rename_handler_exception_leaves_other_renames_order_independent():
+    def rename_handler(field):
+        if field in ('a', 'b'):
+            raise ValueError('cannot rename ' + field)
+        return field.upper()
+
+    schema = {
+        'a': {'rename_handler': rename_handler},
+        'b': {'rename_handler': rename_handler},
+        'c': {'rename_handler': rename_handler},
+    }
+    document = {'a': 1, 'b': 2, 'c': 3}
+
+    results = [
+        normalization_result(dict(items), schema, simultaneous_renaming=True)
+        for items in permutations(document.items())
+    ]
+
+    assert all(result == results[0][0] for result, _ in results[1:])
+    assert all(actual_errors == results[0][1] for _, actual_errors in results[1:])
+    result, actual_errors = results[0]
+    assert result == {'a': 1, 'b': 2, 'C': 3}
+    assert [error[0] for error in actual_errors] == [('a',), ('b',)]
+    assert {error[1] for error in actual_errors} == {errors.RENAMING_FAILED.code}
+
+
+def test_simultaneous_rename_is_planned_separately_for_nested_mappings():
+    schema = {
+        'outer': {
+            'type': 'dict',
+            'schema': {'a': {'rename': 'b'}, 'b': {'rename': 'a'}},
+        }
+    }
+    document = {'outer': {'a': 1, 'b': 2}}
+
+    result, actual_errors = normalization_result(
+        document, schema, simultaneous_renaming=True
+    )
+
+    assert result == {'outer': {'a': 2, 'b': 1}}
+    assert actual_errors == ()
+
+
+def test_rename_remains_sequential_by_default():
+    schema = {'a': {'rename': 'b'}, 'b': {'rename': 'a'}}
+
+    result, actual_errors = normalization_result(
+        {'a': 1, 'b': 2}, schema
+    )
+
+    assert result == {'a': 1}
+    assert actual_errors == ()
 
 
 def test_purge_unknown():
