@@ -916,6 +916,51 @@ A list of types can be used to allow different values:
 
 .. [#] This is actually an alias of :class:`py2:str` in Python 2.
 
+.. _unique_by-rule:
+
+unique_by
+---------
+This rule validates that the items of a list are unique with regard to a key
+that is composed of one or more field lookups within each item. The constraint
+is either a single field path or a list of field paths; a path addresses
+nested fields in :term:`mapping` items by separating the field names with
+dots.
+
+.. doctest::
+
+    >>> schema = {'stations':
+    ...              {'type': 'list',
+    ...               'unique_by': ['station', 'channel']}}
+    >>> document = {'stations': [{'station': 'alpha', 'channel': 1},
+    ...                          {'station': 'alpha', 'channel': 2}]}
+    >>> v.validate(document, schema)
+    True
+
+    >>> document['stations'].append({'station': 'alpha', 'channel': 1})
+    >>> v.validate(document, schema)
+    False
+    >>> v.errors  # doctest: +SKIP
+    {'stations': [{0: ['duplicate value ...'], 2: ['duplicate value ...']}]}
+
+The values are compared as they result from :doc:`normalization
+<normalization-rules>`, e.g. after coercion. The comparison is type-aware:
+values of different types are never considered equal, so Python's equality
+semantics (like ``1 == True``) do not apply. Unhashable values like lists or
+dicts are compared by their (recursively normalized) content, not by a string
+representation.
+
+A field that is missing in an item is treated as a distinct marker that
+compares unequal to any value, including ``None``; two items that both lack a
+key field are considered equal in that regard.
+
+For each group of conflicting items, one error is emitted per involved item.
+An error's :attr:`~cerberus.errors.ValidationError.document_path` points to
+the item's position in the list, and its ``info`` contains the tuple of all
+row indices in the conflict group, the first element being the first
+occurrence of the duplicated key.
+
+.. versionadded:: 1.4
+
 .. _valuesrules-rule:
 
 valuesrules

@@ -15,6 +15,7 @@ from cerberus.platform import (
     Iterable,
     Mapping,
     Sequence,
+    Set,
     Sized,
 )
 from cerberus.schema import (
@@ -26,6 +27,78 @@ from cerberus.schema import (
 from cerberus.utils import drop_item_from_tuple, readonly_classproperty, TypeDefinition
 
 toy_error_handler = errors.ToyErrorHandler()
+
+
+class _Missing(object):
+    """Sentinel that marks a missing key in ``unique_by`` key lookups.
+
+    It compares and hashes distinct from any other value, including ``None``,
+    so that records lacking a key field are only considered duplicates of
+    other records that lack the same key field.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return '<missing>'
+
+
+_MISSING = _Missing()
+
+
+def _lookup_path(mapping, path):
+    """Looks up a dotted ``path`` in nested mappings.
+
+    Returns :data:`_MISSING` if any path segment is absent or a non-mapping
+    value is encountered along the way.
+    """
+    value = mapping
+    for segment in path.split('.'):
+        if isinstance(value, Mapping) and segment in value:
+            value = value[segment]
+        else:
+            return _MISSING
+    return value
+
+
+def _unique_by_component(value):
+    """Returns a hashable, type-aware canonical representation of ``value``.
+
+    The representation is a tuple whose first element is a type tag, so that
+    Python's equality semantics (e.g. ``1 == True`` or ``1 == 1.0``) do not
+    conflate values of distinct types. Unhashable container values are
+    recursively converted to hashable equivalents rather than being
+    stringified.
+    """
+    if value is _MISSING:
+        return ('missing',)
+    if value is None:
+        return ('none',)
+    if isinstance(value, bool):
+        return ('boolean', value)
+    if isinstance(value, _int_types):
+        return ('integer', value)
+    if isinstance(value, float):
+        return ('float', value)
+    if isinstance(value, _str_type):
+        return ('string', value)
+    if isinstance(value, bytes):
+        return ('bytes', value)
+    if isinstance(value, Mapping):
+        return (
+            'mapping',
+            frozenset(
+                (_unique_by_component(k), _unique_by_component(v))
+                for k, v in value.items()
+            ),
+        )
+    if isinstance(value, Sequence):
+        return ('sequence', tuple(_unique_by_component(v) for v in value))
+    if isinstance(value, Set):
+        return ('set', frozenset(_unique_by_component(v) for v in value))
+    if isinstance(value, Hashable):
+        return (type(value).__name__, value)
+    return ('unhashable', type(value).__name__, repr(value))
 
 
 def dummy_for_rule_validation(rule_constraints):
@@ -1558,6 +1631,42 @@ class BareValidator(object):
 
         self._error(field, errors.BAD_TYPE)
         self._drop_remaining_rules()
+
+    def _validate_unique_by(self, unique_by, field, value):
+        """{'type': ['string', 'list'], 'minlength': 1, 'schema': {'type': 'string'}}"""
+        if isinstance(value, _str_type) or not isinstance(value, Sequence):
+            return
+
+        paths = (unique_by,) if isinstance(unique_by, _str_type) else tuple(unique_by)
+
+        groups, raw_keys = {}, {}
+        for index, item in enumerate(value):
+            raw_key = tuple(_lookup_path(item, path) for path in paths)
+            key = tuple(_unique_by_component(component) for component in raw_key)
+            if key not in groups:
+                groups[key] = []
+                raw_keys[key] = raw_key
+            groups[key].append(index)
+
+        _errors = errors.ErrorList()
+        for key, indices in groups.items():
+            if len(indices) < 2:
+                continue
+            indices = tuple(indices)
+            for index in indices:
+                _errors.append(
+                    errors.ValidationError(
+                        document_path=self.document_path + (field, index),
+                        schema_path=self.schema_path + (field, 'unique_by'),
+                        code=errors.UNIQUE_BY.code,
+                        rule=errors.UNIQUE_BY.rule,
+                        constraint=paths,
+                        value=raw_keys[key],
+                        info=(indices,),
+                    )
+                )
+        if _errors:
+            self._error(_errors)
 
     def _validate_valuesrules(self, schema, field, value):
         """

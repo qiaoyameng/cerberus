@@ -17,6 +17,7 @@ from cerberus.tests import (
     assert_fail,
     assert_has_error,
     assert_not_has_error,
+    assert_schema_error,
     assert_success,
 )
 from cerberus.tests.conftest import sample_schema
@@ -2018,3 +2019,322 @@ def test_schema_validation_from_rules_set():
     Validator(schema={'a_dict': 'addr'}).validate(
         {'a_dict': {'address': 'my address', 'city': 'my town'}}
     )
+
+
+def test_unique_by():
+    schema = {'stations': {'type': 'list', 'unique_by': ['station', 'channel']}}
+    validator = Validator(schema)
+
+    assert_success(
+        {
+            'stations': [
+                {'station': 'alpha', 'channel': 1},
+                {'station': 'alpha', 'channel': 2},
+                {'station': 'beta', 'channel': 1},
+            ]
+        },
+        validator=validator,
+    )
+
+    document = {
+        'stations': [
+            {'station': 'alpha', 'channel': 1},
+            {'station': 'beta', 'channel': 2},
+            {'station': 'alpha', 'channel': 1},
+        ]
+    }
+    assert_fail(
+        document,
+        validator=validator,
+        errors=[
+            (
+                ('stations', 0),
+                ('stations', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('station', 'channel'),
+                ((0, 2),),
+            ),
+            (
+                ('stations', 2),
+                ('stations', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('station', 'channel'),
+                ((0, 2),),
+            ),
+        ],
+    )
+    # the error paths directly mark the conflicting rows in the list
+    assert errors.UNIQUE_BY in validator.document_error_tree['stations'][0]
+    assert errors.UNIQUE_BY in validator.document_error_tree['stations'][2]
+    for error in validator._errors:
+        assert error.value == ('alpha', 1)
+
+
+def test_unique_by_multiple_conflict_groups():
+    validator = Validator({'points': {'unique_by': ['station', 'channel']}})
+    document = {
+        'points': [
+            {'station': 'a', 'channel': 1},
+            {'station': 'b', 'channel': 1},
+            {'station': 'a', 'channel': 1},
+            {'station': 'b', 'channel': 1},
+            {'station': 'a', 'channel': 1},
+        ]
+    }
+    assert not validator.validate(document)
+    _errors = validator._errors
+    assert len(_errors) == 5
+    for index in (0, 2, 4):
+        assert_has_error(
+            _errors,
+            ('points', index),
+            ('points', 'unique_by'),
+            errors.UNIQUE_BY,
+            ('station', 'channel'),
+            ((0, 2, 4),),
+        )
+    for index in (1, 3):
+        assert_has_error(
+            _errors,
+            ('points', index),
+            ('points', 'unique_by'),
+            errors.UNIQUE_BY,
+            ('station', 'channel'),
+            ((1, 3),),
+        )
+
+
+def test_unique_by_single_string_constraint():
+    validator = Validator({'ids': {'unique_by': 'id'}})
+    assert_success({'ids': [{'id': 1}, {'id': 2}]}, validator=validator)
+    assert_fail(
+        {'ids': [{'id': 1}, {'id': 1}]},
+        validator=validator,
+        errors=[
+            (('ids', 0), ('ids', 'unique_by'), errors.UNIQUE_BY, ('id',), ((0, 1),)),
+            (('ids', 1), ('ids', 'unique_by'), errors.UNIQUE_BY, ('id',), ((0, 1),)),
+        ],
+    )
+
+
+def test_unique_by_compares_normalized_values():
+    schema = {
+        'measures': {
+            'type': 'list',
+            'schema': {
+                'type': 'dict',
+                'schema': {'station': {'type': 'integer', 'coerce': int}},
+            },
+            'unique_by': 'station',
+        }
+    }
+    validator = Validator(schema)
+    document = {'measures': [{'station': '1'}, {'station': 1}]}
+    assert_fail(
+        document,
+        validator=validator,
+        errors=[
+            (
+                ('measures', 0),
+                ('measures', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('station',),
+                ((0, 1),),
+            ),
+            (
+                ('measures', 1),
+                ('measures', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('station',),
+                ((0, 1),),
+            ),
+        ],
+    )
+    # the comparison happened on the coerced values
+    assert validator.document == {'measures': [{'station': 1}, {'station': 1}]}
+    for error in validator._errors:
+        assert error.value == (1,)
+
+
+def test_unique_by_nested_paths():
+    validator = Validator(
+        {'stations': {'unique_by': ['meta.station', 'meta.channel']}}
+    )
+    assert_success(
+        {
+            'stations': [
+                {'meta': {'station': 'a', 'channel': 1}},
+                {'meta': {'station': 'a', 'channel': 2}},
+            ]
+        },
+        validator=validator,
+    )
+    assert_fail(
+        {
+            'stations': [
+                {'meta': {'station': 'a', 'channel': 1}},
+                {'meta': {'station': 'a', 'channel': 1}},
+            ]
+        },
+        validator=validator,
+        errors=[
+            (
+                ('stations', 0),
+                ('stations', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('meta.station', 'meta.channel'),
+                ((0, 1),),
+            ),
+            (
+                ('stations', 1),
+                ('stations', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('meta.station', 'meta.channel'),
+                ((0, 1),),
+            ),
+        ],
+    )
+
+
+def test_unique_by_missing_keys():
+    validator = Validator({'stations': {'unique_by': ['station', 'channel']}})
+
+    # records that lack the same key field are duplicates of each other
+    assert_fail(
+        {'stations': [{'station': 'a'}, {'station': 'a'}]},
+        validator=validator,
+        errors=[
+            (
+                ('stations', 0),
+                ('stations', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('station', 'channel'),
+                ((0, 1),),
+            ),
+            (
+                ('stations', 1),
+                ('stations', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('station', 'channel'),
+                ((0, 1),),
+            ),
+        ],
+    )
+
+    # a missing key is distinct from an explicit None
+    assert_success(
+        {'stations': [{'station': 'a'}, {'station': 'a', 'channel': None}]},
+        validator=validator,
+    )
+
+    # missing keys on different paths are also tracked separately
+    assert_success(
+        {'stations': [{'station': 'a'}, {'station': 'a', 'channel': 1}]},
+        validator=validator,
+    )
+
+
+def test_unique_by_none_values():
+    validator = Validator({'rows': {'unique_by': 'k'}})
+    assert_fail(
+        {'rows': [{'k': None}, {'k': None}]},
+        validator=validator,
+        errors=[
+            (('rows', 0), ('rows', 'unique_by'), errors.UNIQUE_BY, ('k',), ((0, 1),)),
+            (('rows', 1), ('rows', 'unique_by'), errors.UNIQUE_BY, ('k',), ((0, 1),)),
+        ],
+    )
+
+
+def test_unique_by_type_aware_comparison():
+    validator = Validator({'values': {'unique_by': 'flag'}})
+
+    # Python's ``1 == True == 1.0`` equality must not conflate distinct types
+    assert_success(
+        {'values': [{'flag': 1}, {'flag': True}, {'flag': 1.0}]},
+        validator=validator,
+    )
+
+    assert_fail(
+        {'values': [{'flag': True}, {'flag': True}]},
+        validator=validator,
+        errors=[
+            (
+                ('values', 0),
+                ('values', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('flag',),
+                ((0, 1),),
+            ),
+            (
+                ('values', 1),
+                ('values', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('flag',),
+                ((0, 1),),
+            ),
+        ],
+    )
+
+
+def test_unique_by_unhashable_values():
+    validator = Validator({'rows': {'unique_by': 'tags'}})
+
+    assert_success(
+        {'rows': [{'tags': [1, 2]}, {'tags': [2, 1]}]}, validator=validator
+    )
+    assert_success(
+        {'rows': [{'tags': {'a': 1}}, {'tags': {'a': 2}}]}, validator=validator
+    )
+
+    assert_fail(
+        {'rows': [{'tags': [1, 2]}, {'tags': [1, 2]}]},
+        validator=validator,
+        errors=[
+            (
+                ('rows', 0),
+                ('rows', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('tags',),
+                ((0, 1),),
+            ),
+            (
+                ('rows', 1),
+                ('rows', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('tags',),
+                ((0, 1),),
+            ),
+        ],
+    )
+    assert_fail(
+        {'rows': [{'tags': {'a': 1}}, {'tags': {'a': 1}}]},
+        validator=validator,
+        errors=[
+            (
+                ('rows', 0),
+                ('rows', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('tags',),
+                ((0, 1),),
+            ),
+            (
+                ('rows', 1),
+                ('rows', 'unique_by'),
+                errors.UNIQUE_BY,
+                ('tags',),
+                ((0, 1),),
+            ),
+        ],
+    )
+
+
+def test_unique_by_with_non_sequence_value():
+    validator = Validator({'rows': {'unique_by': 'k'}})
+    assert_success({'rows': 'not-a-list'}, validator=validator)
+
+
+def test_unique_by_schema_validation():
+    assert_schema_error({'rows': []}, {'rows': {'unique_by': 3}})
+    assert_schema_error({'rows': []}, {'rows': {'unique_by': []}})
+    assert_schema_error({'rows': []}, {'rows': {'unique_by': [1]}})
