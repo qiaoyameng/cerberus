@@ -11,6 +11,11 @@ Full documentation is available at https://python-cerberus.org/
 from __future__ import absolute_import
 
 from cerberus.platform import importlib_metadata
+from cerberus.normalization_report import (
+    MISSING,
+    NormalizationAction,
+    NormalizationReport,
+)
 from cerberus.schema import rules_set_registry, schema_registry, SchemaError
 from cerberus.utils import TypeDefinition
 from cerberus.validator import DocumentError, Validator
@@ -22,6 +27,9 @@ except importlib_metadata.PackageNotFoundError:
 
 __all__ = [
     DocumentError.__name__,
+    'MISSING',
+    NormalizationAction.__name__,
+    NormalizationReport.__name__,
     SchemaError.__name__,
     TypeDefinition.__name__,
     Validator.__name__,

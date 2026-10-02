@@ -137,3 +137,42 @@ is processed through that chain of coercers.
    {'flag': True}
 
 .. versionadded:: 0.9
+
+.. _normalization-report:
+
+Reporting Normalization Changes
+-------------------------------
+To audit which changes normalization applied to a document, initialize a
+validator with ``report_normalization=True``. The changes are then recorded
+in execution order in
+:attr:`~cerberus.Validator.normalization_report` as
+:class:`~cerberus.normalization_report.NormalizationAction` instances that
+each hold the kind of change (``rename``, ``purge_unknown``,
+``purge_readonly``, ``default`` or ``coerce``), the affected field's path in
+the document, the causing rule's path in the schema and the values before and
+after the change. The ``origin_path`` of an action refers to the field's path
+in the original document, regardless of preceding renames. A value that was
+purged records the removed value, while a field that was not provided at all
+is marked with the :data:`~cerberus.MISSING` sentinel. Changes that failed
+(e.g. a coercion that raised an exception) are not recorded.
+
+The report is self-contained and can be replayed on a copy of the original
+document to reproduce the normalized result:
+
+.. doctest::
+
+   >>> schema = {'foo': {'rename': 'bar'}, 'bar': {'coerce': str},
+   ...           'kind': {'default': 'purchase'}}
+   >>> v = Validator(schema, report_normalization=True)
+   >>> document = {'foo': 0}
+   >>> v.normalized(document)
+   {'bar': '0', 'kind': 'purchase'}
+   >>> for action in v.normalization_report:
+   ...     print(action.op, action.document_path)
+   rename ('foo',)
+   default ('kind',)
+   coerce ('bar',)
+   >>> v.normalization_report.replay(document)
+   {'bar': '0', 'kind': 'purchase'}
+
+.. versionadded:: 1.4

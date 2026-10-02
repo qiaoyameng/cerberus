@@ -1,6 +1,20 @@
 Cerberus Changelog
 ==================
 
+Version 1.4
+-----------
+
+Not yet released.
+
+New
+~~~
+
+- Optional record of the changes that normalization applies to a document,
+  available as ``normalization_report`` when a validator is initialized with
+  ``report_normalization=True``. The report can be replayed on a copy of the
+  original document to reproduce the normalized result.
+
+
 Version 1.3.8
 -------------
 
