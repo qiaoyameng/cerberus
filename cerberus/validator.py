@@ -1,7 +1,7 @@
 from __future__ import absolute_import
 
 from ast import literal_eval
-from copy import copy
+from copy import copy, deepcopy
 from datetime import date, datetime
 import re
 from warnings import warn
@@ -21,7 +21,9 @@ from cerberus.schema import (
     schema_registry,
     rules_set_registry,
     DefinitionSchema,
+    RulesSetRegistry,
     SchemaError,
+    SchemaRegistry,
 )
 from cerberus.utils import drop_item_from_tuple, readonly_classproperty, TypeDefinition
 
@@ -54,6 +56,91 @@ class _SchemaRuleTypeError(Exception):
     """
 
     pass
+
+
+class _RegistryFreezer(object):
+    """
+    Harvests a consistent snapshot of all registry definitions that a
+    validation schema refers to, directly or transitively. References are
+    preserved as such and each definition is copied only once, hence recursive
+    definitions are supported and not expanded.
+    """
+
+    def __init__(self, schema_registry, rules_set_registry):
+        self._source_schema_registry = schema_registry
+        self._source_rules_set_registry = rules_set_registry
+        self.schema_registry = SchemaRegistry()
+        self.rules_set_registry = RulesSetRegistry()
+        self.missing_definitions = set()
+
+    def freeze_schema(self, schema):
+        """Harvest all references from a validation schema."""
+        if isinstance(schema, _str_type):
+            self._freeze_schema_reference(schema)
+        elif isinstance(schema, Mapping):
+            for rules in schema.values():
+                self.freeze_rules(rules)
+
+    def freeze_rules(self, rules):
+        """Harvest all references from a set of rules."""
+        if isinstance(rules, _str_type):
+            self._freeze_rules_set_reference(rules)
+        elif isinstance(rules, Mapping):
+            for rule, constraint in rules.items():
+                self._freeze_constraint(rule, constraint)
+
+    def _freeze_ambiguous_mapping(self, mapping):
+        # a ``schema`` rule's constraint may be a schema that defines rules
+        # for a mapping's fields or a set of rules for a sequence's items
+        self.freeze_rules(mapping)
+        for value in mapping.values():
+            if isinstance(value, _str_type):
+                self._freeze_rules_set_reference(value, definite=False)
+            elif isinstance(value, Mapping):
+                self._freeze_ambiguous_mapping(value)
+
+    def _freeze_constraint(self, rule, constraint):
+        if rule == 'schema':
+            if isinstance(constraint, _str_type):
+                self._freeze_schema_reference(constraint)
+            elif isinstance(constraint, Mapping):
+                self._freeze_ambiguous_mapping(constraint)
+        elif rule in (
+            'allow_unknown',
+            'keysrules',
+            'valuesrules',
+            # TODO remove the deprecated names with the next major release
+            'keyschema',
+            'valueschema',
+        ):
+            self.freeze_rules(constraint)
+        elif rule in ('allof', 'anyof', 'items', 'noneof', 'oneof'):
+            if isinstance(constraint, Sequence) and not isinstance(
+                constraint, _str_type
+            ):
+                for item in constraint:
+                    self.freeze_rules(item)
+
+    def _freeze_schema_reference(self, name):
+        if name in self.schema_registry.all():
+            return
+        definition = self._source_schema_registry.get(name)
+        if definition is None:
+            self.missing_definitions.add("schema '%s'" % name)
+            return
+        self.schema_registry.add(name, deepcopy(definition))
+        self.freeze_schema(definition)
+
+    def _freeze_rules_set_reference(self, name, definite=True):
+        if name in self.rules_set_registry.all():
+            return
+        definition = self._source_rules_set_registry.get(name)
+        if definition is None:
+            if definite:
+                self.missing_definitions.add("rules set '%s'" % name)
+            return
+        self.rules_set_registry.add(name, deepcopy(definition))
+        self.freeze_rules(definition)
 
 
 class BareValidator(object):
@@ -230,6 +317,70 @@ class BareValidator(object):
     def clear_caches(cls):
         """Purge the cache of known valid schemas."""
         cls._valid_schemas.clear()
+
+    @classmethod
+    def frozen(cls, schema=None, **kwargs):
+        """
+        Creates a validator whose schema and the registry definitions that it
+        depends on are bound to a consistent snapshot of the registries'
+        current state.
+
+        All definitions in the :attr:`schema_registry` and
+        :attr:`rules_set_registry` that the schema refers to - directly or
+        transitively - are copied into registries that are private to the
+        created instance, hence subsequent changes to the source registries
+        don't affect the instance. Recursive references are supported, they
+        are preserved as such and not expanded.
+
+        Missing references and invalid rules are reported collectively in the
+        raised :class:`~cerberus.schema.SchemaError`. The creation doesn't
+        touch the class-level cache of known valid schemas, regardless
+        whether it succeeds or fails.
+
+        :param schema: See :attr:`~cerberus.Validator.schema`.
+        :param kwargs: Any further keyword-arguments are passed to the
+                       validator's initialization.
+        """
+        freezer = _RegistryFreezer(
+            kwargs.get('schema_registry', schema_registry),
+            kwargs.get('rules_set_registry', rules_set_registry),
+        )
+        freezer.freeze_schema(schema)
+        freezer.freeze_rules(kwargs.get('allow_unknown', False))
+        kwargs['schema_registry'] = freezer.schema_registry
+        kwargs['rules_set_registry'] = freezer.rules_set_registry
+        if isinstance(schema, Mapping) and not isinstance(schema, DefinitionSchema):
+            schema = deepcopy(schema)
+
+        # The schema is validated against the frozen registries with a
+        # pristine cache of known valid schemas, so that changed registry
+        # contents cannot be masked by the class-level cache and the cache
+        # is left untouched, in particular with no half-validated entries
+        # when the creation fails.
+        shared_valid_schemas = cls._valid_schemas
+        cls._valid_schemas = set()
+        try:
+            validator = cls(schema=schema, **kwargs)
+        except SchemaError as error:
+            schema_error, validator = error, None
+        else:
+            schema_error = None
+        finally:
+            cls._valid_schemas = shared_valid_schemas
+
+        if schema_error is None and not freezer.missing_definitions:
+            return validator
+
+        problems = {}
+        if freezer.missing_definitions:
+            problems['missing registry definitions'] = sorted(
+                freezer.missing_definitions
+            )
+        if schema_error is not None:
+            problems['schema errors'] = (
+                schema_error.args[0] if schema_error.args else None
+            )
+        raise SchemaError(problems)
 
     def _error(self, *args):
         """
