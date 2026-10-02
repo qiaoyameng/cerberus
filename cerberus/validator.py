@@ -28,6 +28,19 @@ from cerberus.utils import drop_item_from_tuple, readonly_classproperty, TypeDef
 toy_error_handler = errors.ToyErrorHandler()
 
 
+class _MissingValue(object):
+    """
+    Sentinel that marks an unresolvable document path. It allows to distinguish
+    a missing field from a field whose value is :obj:`None`.
+    """
+
+    def __repr__(self):
+        return '<missing>'
+
+
+MISSING = _MissingValue()
+
+
 def dummy_for_rule_validation(rule_constraints):
     def dummy(self, constraint, field, value):
         raise RuntimeError(
@@ -1221,6 +1234,106 @@ class BareValidator(object):
         for dependency in dependencies:
             if self._lookup_field(dependency)[0] is None:
                 self._error(field, errors.DEPENDENCIES_FIELD, dependency)
+
+    def _validate_dependencies_expr(self, expression, field, value):
+        """{'type': 'dict', 'check_with': 'dependencies_expr'}"""
+        satisfied, report = self.__evaluate_dependencies_expr(expression)
+        if not satisfied:
+            self._error(field, errors.DEPENDENCIES_EXPR, report)
+
+    def __evaluate_dependencies_expr(self, expression):
+        """
+        Evaluates a dependency expression against the current document.
+
+        :param expression: The expression as :term:`mapping`. See the
+                           ``dependencies_expr`` rule's documentation for the
+                           supported nodes.
+        :returns: A two-value :class:`tuple` with a :class:`bool` that
+                  indicates whether the expression is satisfied and a report
+                  that describes the unfulfilled parts of the expression as a
+                  tree of mappings; the latter is :obj:`None` when the
+                  expression is satisfied.
+        """
+        if 'all' in expression:
+            return self.__evaluate_dependencies_all(expression['all'])
+        elif 'any' in expression:
+            return self.__evaluate_dependencies_any(expression['any'])
+        elif 'not' in expression:
+            return self.__evaluate_dependencies_not(expression['not'])
+        else:
+            return self.__evaluate_dependencies_predicate(expression)
+
+    def __evaluate_dependencies_all(self, operands):
+        # all operands are evaluated, even after a failure was encountered, to
+        # provide a complete report of the unfulfilled dependencies
+        failures = []
+        for operand in operands:
+            satisfied, report = self.__evaluate_dependencies_expr(operand)
+            if not satisfied:
+                failures.append(report)
+        if failures:
+            return False, {'all': failures}
+        return True, None
+
+    def __evaluate_dependencies_any(self, operands):
+        failures = []
+        for operand in operands:
+            satisfied, report = self.__evaluate_dependencies_expr(operand)
+            if satisfied:  # short-circuit evaluation
+                return True, None
+            failures.append(report)
+        return False, {'any': failures}
+
+    def __evaluate_dependencies_not(self, operand):
+        satisfied, _ = self.__evaluate_dependencies_expr(operand)
+        if satisfied:
+            return False, {'not': operand}
+        return True, None
+
+    def __evaluate_dependencies_predicate(self, expression):
+        path = expression['field']
+        value = self.__lookup_dependencies_path(path)
+        if value is MISSING:
+            return False, {
+                'field': path,
+                'path': self.__absolute_dependencies_path(path),
+                'problem': 'missing',
+            }
+        if 'equals' in expression and value != expression['equals']:
+            return False, {
+                'field': path,
+                'path': self.__absolute_dependencies_path(path),
+                'problem': 'mismatch',
+                'expected': expression['equals'],
+                'actual': value,
+            }
+        return True, None
+
+    def __lookup_dependencies_path(self, path):
+        """
+        Resolves a field path like :meth:`_lookup_field`, but returns the
+        :data:`MISSING` sentinel when the path cannot be resolved.
+        """
+        if path.startswith('^'):
+            path = path[1:]
+            context = self.document if path.startswith('^') else self.root_document
+        else:
+            context = self.document
+
+        for part in path.split('.'):
+            if not isinstance(context, Mapping) or part not in context:
+                return MISSING
+            context = context[part]
+        return context
+
+    def __absolute_dependencies_path(self, path):
+        """Resolves a possibly relative field path to a root-relative tuple."""
+        if path.startswith('^^'):
+            return self.document_path + tuple(path[1:].split('.'))
+        elif path.startswith('^'):
+            return tuple(path[1:].split('.'))
+        else:
+            return self.document_path + tuple(path.split('.'))
 
     def _validate_empty(self, empty, field, value):
         """{'type': 'boolean'}"""

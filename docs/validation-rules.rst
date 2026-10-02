@@ -283,6 +283,66 @@ special meaning.
 
 .. versionadded:: 0.7
 
+.. _dependencies_expr:
+
+dependencies_expr
+-----------------
+This rule allows one to define dependencies as a declarative expression when
+the :ref:`dependencies` rule is not expressive enough, e.g. when a field
+requires either a certificate or a combination of account and token. The
+expression is a :term:`mapping` that contains exactly one of these nodes:
+
+- ``{'all': [expression, ...]}`` -- satisfied when all operands are satisfied
+- ``{'any': [expression, ...]}`` -- satisfied when at least one operand is
+  satisfied
+- ``{'not': expression}`` -- satisfied when the operand is not satisfied
+- ``{'field': path}`` -- satisfied when the addressed field exists in the
+  document
+- ``{'field': path, 'equals': value}`` -- satisfied when the addressed field
+  exists and its value equals the given one
+
+Field paths use the same dot-notation as :ref:`dependencies`: Relative paths
+are resolved against the currently processed (sub-)document, a leading ``^``
+addresses the root document. A missing field is distinguished from a field
+whose value is ``None``.
+
+When the validation of a document fails, the error's ``info`` contains a tree
+that describes the unfulfilled parts of the expression, including the
+root-relative ``path`` of each offending field.
+
+.. doctest::
+
+   >>> schema = {
+   ...     'cert': {'type': 'string'},
+   ...     'account': {'type': 'string'},
+   ...     'token': {'type': 'string'},
+   ...     'payload': {
+   ...         'dependencies_expr': {
+   ...             'any': [
+   ...                 {'field': 'cert'},
+   ...                 {'all': [{'field': 'account'}, {'field': 'token'}]}]}}}
+
+   >>> document = {'payload': 7, 'cert': 'abc'}
+   >>> v.validate(document, schema)
+   True
+
+   >>> document = {'payload': 7, 'account': 'agent', 'token': 'xyz'}
+   >>> v.validate(document, schema)
+   True
+
+   >>> document = {'payload': 7, 'account': 'agent'}
+   >>> v.validate(document, schema)
+   False
+
+   >>> v.errors
+   {'payload': ["unfulfilled dependencies: {'any': [{'field': 'cert', 'path': ('cert',), 'problem': 'missing'}, {'all': [{'field': 'token', 'path': ('token',), 'problem': 'missing'}]}]}"]}
+
+.. note::
+   The evaluation of this rule does not consider any constraints defined with
+   the :ref:`required` rule.
+
+.. versionadded:: 1.3.9
+
 empty
 -----
 If constrained with ``False`` validation of an :term:`iterable` value will fail

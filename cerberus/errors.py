@@ -33,6 +33,7 @@ UNKNOWN_FIELD = ErrorDefinition(0x03, None)
 DEPENDENCIES_FIELD = ErrorDefinition(0x04, 'dependencies')
 DEPENDENCIES_FIELD_VALUE = ErrorDefinition(0x05, 'dependencies')
 EXCLUDES_FIELD = ErrorDefinition(0x06, 'excludes')
+DEPENDENCIES_EXPR = ErrorDefinition(0x07, 'dependencies_expr')
 
 # shape
 DOCUMENT_FORMAT = ErrorDefinition(0x21, None)  # issues/141
@@ -473,6 +474,7 @@ class BasicErrorHandler(BaseErrorHandler):
         0x04: "field '{0}' is required",
         0x05: "depends on these values: {constraint}",
         0x06: "{0} must not be present with '{field}'",
+        0x07: "unfulfilled dependencies: {0}",
         0x21: "'{0}' is not a document, must be a dict",
         0x22: "empty values not allowed",
         0x23: "null value not allowed",

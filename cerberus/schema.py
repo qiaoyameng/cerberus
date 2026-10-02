@@ -386,6 +386,67 @@ class SchemaValidatorMixin(object):
                 path = self.document_path + (field,)
                 self._error(path, 'All dependencies must be a hashable type.')
 
+    def _check_with_dependencies_expr(self, field, value):
+        # the whole expression tree is traversed here, regardless of any
+        # short-circuiting that the evaluation against a document applies
+        self.__check_dependencies_expr_node(self.document_path + (field,), value)
+
+    def __check_dependencies_expr_node(self, path, node):
+        if not isinstance(node, Mapping):
+            self._error(path, 'Dependency expression nodes must be mappings.')
+            return
+
+        operators = [x for x in ('all', 'any', 'not') if x in node]
+        if operators:
+            if len(node) > 1:
+                self._error(path, 'An operator node must not contain further keys.')
+                return
+            operator = operators[0]
+            operand = node[operator]
+            if operator == 'not':
+                if not isinstance(operand, Mapping):
+                    self._error(
+                        path,
+                        "The operand of 'not' must be a dependency expression.",
+                    )
+                    return
+                self.__check_dependencies_expr_node(path + (operator,), operand)
+            else:
+                if not isinstance(operand, Sequence) or isinstance(
+                    operand, _str_type
+                ):
+                    self._error(
+                        path,
+                        "The operand of '%s' must be a list of dependency "
+                        'expressions.' % operator,
+                    )
+                    return
+                if not operand:
+                    self._error(
+                        path,
+                        "The operand of '%s' must not be empty." % operator,
+                    )
+                    return
+                for i, sub_expression in enumerate(operand):
+                    self.__check_dependencies_expr_node(
+                        path + (operator, i), sub_expression
+                    )
+        else:
+            unknown_keys = set(node) - {'equals', 'field'}
+            if unknown_keys:
+                self._error(
+                    path,
+                    'Unknown keys in a dependency expression: %s'
+                    % ', '.join(sorted(unknown_keys)),
+                )
+                return
+            if 'field' not in node:
+                self._error(path, "A dependency predicate must contain a 'field' key.")
+            elif not isinstance(node['field'], _str_type):
+                self._error(
+                    path, "The 'field' of a dependency predicate must be a string."
+                )
+
     def _check_with_items(self, field, value):
         for i, schema in enumerate(value):
             self._check_with_bulk_schema((field, i), schema)

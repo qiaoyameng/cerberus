@@ -1,6 +1,19 @@
 Cerberus Changelog
 ==================
 
+Version 1.3.9
+-------------
+
+Unreleased.
+
+New
+~~~
+
+- The ``dependencies_expr`` rule allows to define field dependencies as
+  declarative expressions with ``all``, ``any`` and ``not`` operators as well
+  as field-existence and value-matching predicates
+
+
 Version 1.3.8
 -------------
 
