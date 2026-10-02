@@ -7,6 +7,11 @@ import re
 from warnings import warn
 
 from cerberus import errors
+from cerberus.dependencies import (
+    DependencyExpressionEvaluator,
+    is_expression,
+    is_expression_node,
+)
 from cerberus.platform import (
     _int_types,
     _str_type,
@@ -1181,6 +1186,14 @@ class BareValidator(object):
 
     def _validate_dependencies(self, dependencies, field, value):
         """{'type': ('dict', 'hashable', 'list'), 'check_with': 'dependencies'}"""
+        if is_expression(dependencies):
+            result = DependencyExpressionEvaluator(
+                self, field, dependencies
+            ).evaluate()
+            if not result.success:
+                self._error([result.error])
+            return
+
         if isinstance(dependencies, _str_type) or not isinstance(
             dependencies, (Iterable, Mapping)
         ):
@@ -1219,7 +1232,13 @@ class BareValidator(object):
 
     def __validate_dependencies_sequence(self, dependencies, field):
         for dependency in dependencies:
-            if self._lookup_field(dependency)[0] is None:
+            if is_expression_node(dependency):
+                result = DependencyExpressionEvaluator(
+                    self, field, dependency
+                ).evaluate()
+                if not result.success:
+                    self._error([result.error])
+            elif self._lookup_field(dependency)[0] is None:
                 self._error(field, errors.DEPENDENCIES_FIELD, dependency)
 
     def _validate_empty(self, empty, field, value):

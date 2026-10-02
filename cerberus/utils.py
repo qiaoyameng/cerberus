@@ -70,17 +70,25 @@ def mapping_to_frozenset(mapping):
         if isinstance(value, Mapping):
             aggregation[key] = mapping_to_frozenset(value)
         elif isinstance(value, Sequence):
-            value = list(value)
-            for i, item in enumerate(value):
-                if isinstance(item, Mapping):
-                    value[i] = mapping_to_frozenset(item)
-            aggregation[key] = tuple(value)
+            aggregation[key] = tuple(_hashable_sequence(value))
         elif isinstance(value, Set):
             aggregation[key] = frozenset(value)
         else:
             aggregation[key] = value
 
     return frozenset(aggregation.items())
+
+
+def _hashable_sequence(value):
+    result = []
+    for item in value:
+        if isinstance(item, Mapping):
+            result.append(mapping_to_frozenset(item))
+        elif isinstance(item, Sequence) and not isinstance(item, _str_type):
+            result.append(tuple(_hashable_sequence(item)))
+        else:
+            result.append(item)
+    return result
 
 
 def quote_string(value):

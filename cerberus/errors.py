@@ -71,6 +71,7 @@ SEQUENCE_SCHEMA = ErrorDefinition(0x82, 'schema')
 KEYSRULES = KEYSCHEMA = ErrorDefinition(0x83, 'keysrules')
 VALUESRULES = VALUESCHEMA = ErrorDefinition(0x84, 'valuesrules')
 BAD_ITEMS = ErrorDefinition(0x8F, 'items')
+DEPENDENCIES_EXPRESSION = ErrorDefinition(0x85, 'dependencies')
 
 LOGICAL = ErrorDefinition(0x90, None)
 NONEOF = ErrorDefinition(0x91, 'noneof')
@@ -497,7 +498,7 @@ class BasicErrorHandler(BaseErrorHandler):
         0x82: "one or more sequence-items don't validate: {0}",
         0x83: "one or more keys of a mapping  don't validate: {0}",
         0x84: "one or more values in a mapping don't validate: {0}",
-        0x85: "one or more sequence-items don't validate: {0}",
+        0x85: "dependency expression does not validate",
         0x91: "one or more definitions validate",
         0x92: "none or more than one rule validate",
         0x93: "no definitions validate",
@@ -579,6 +580,13 @@ class BasicErrorHandler(BaseErrorHandler):
             subtree.update(new.tree)
 
     def _insert_group_error(self, error):
+        if not error.child_errors:
+            self._insert_error(
+                error.document_path,
+                self._format_message(error.field, error),
+            )
+            return
+
         for child_error in error.child_errors:
             if child_error.is_logic_error:
                 self._insert_logic_error(child_error)

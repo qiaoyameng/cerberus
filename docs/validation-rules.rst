@@ -217,6 +217,66 @@ but also any of their allowed values must be matched.
    >>> v.errors
    {'field2': ["depends on these values: {'field1': 'one'}"]}
 
+Declarative expressions
+~~~~~~~~~~~~~~~~~~~~~~~
+
+More complex requirements can be expressed with structured objects instead of
+executable strings. ``all`` and ``any`` take a non-empty list of expressions,
+``not`` takes exactly one expression, and ``field`` tests for the existence of
+a field. At the root of a dependency, the explicit ``$field`` key is used for
+value matches so the legacy mapping syntax remains available for a field named
+``field``.
+
+.. doctest::
+
+   >>> schema = {
+   ...   'request': {
+   ...     'dependencies': {
+   ...       'any': [
+   ...         {'field': 'certificate'},
+   ...         {'all': [{'field': 'account'}, {'field': 'token'}]}
+   ...       ]
+   ...     }
+   ...   },
+   ...   'certificate': {},
+   ...   'account': {},
+   ...   'token': {}
+   ... }
+
+   >>> v.validate({'request': 1, 'certificate': 'signed'}, schema)
+   True
+   >>> v.validate({'request': 1, 'account': 'alice', 'token': '...'}, schema)
+   True
+   >>> v.validate({'request': 1, 'account': 'alice'}, schema)
+   False
+
+A field with the value :obj:`None` is present. A missing field is different
+from a field containing :obj:`None`.
+
+.. doctest::
+
+   >>> schema = {'token': {'nullable': True}, 'request': {'dependencies': 'token'}}
+   >>> v.validate({'request': 1, 'token': None}, schema)
+   True
+   >>> v.validate({'request': 1}, schema)
+   False
+
+The value of an existing field can be checked with ``eq``:
+
+.. doctest::
+
+   >>> schema = {
+   ...   'request': {'dependencies': {'$field': 'auth', 'eq': 'token'}},
+   ...   'auth': {}
+   ... }
+   >>> v.validate({'request': 1, 'auth': 'token'}, schema)
+   True
+   >>> v.validate({'request': 1, 'auth': 'certificate'}, schema)
+   False
+
+The expression paths below a failed rule are retained in the error objects'
+``schema_path`` and grouped error tree, so the failing branch can be located.
+
 Declaring dependencies on subdocument fields with dot-notation is also
 supported:
 

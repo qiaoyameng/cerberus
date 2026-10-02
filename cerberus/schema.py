@@ -3,6 +3,11 @@ from __future__ import absolute_import
 from warnings import warn
 
 from cerberus import errors
+from cerberus.dependencies import (
+    is_expression,
+    is_expression_node,
+    validate_expression,
+)
 from cerberus.platform import (
     _str_type,
     Callable,
@@ -372,19 +377,40 @@ class SchemaValidatorMixin(object):
 
     def _check_with_dependencies(self, field, value):
         if isinstance(value, _str_type):
-            pass
-        elif isinstance(value, Mapping):
-            validator = self._get_child_validator(
-                document_crumb=field,
-                schema={'valuesrules': {'type': 'list'}},
-                allow_unknown=True,
+            validate_expression(
+                value,
+                lambda path, message: self._error(
+                    self.document_path + (field,) + path, message
+                ),
             )
-            if not validator(value, normalize=False):
-                self._error(validator._errors)
+        elif isinstance(value, Mapping):
+            if is_expression(value):
+                validate_expression(
+                    value,
+                    lambda path, message: self._error(
+                        self.document_path + (field,) + path, message
+                    ),
+                )
+            else:
+                validator = self._get_child_validator(
+                    document_crumb=field,
+                    schema={'valuesrules': {'type': 'list'}},
+                    allow_unknown=True,
+                )
+                if not validator(value, normalize=False):
+                    self._error(validator._errors)
         elif isinstance(value, Sequence):
-            if not all(isinstance(x, Hashable) for x in value):
-                path = self.document_path + (field,)
-                self._error(path, 'All dependencies must be a hashable type.')
+            for index, item in enumerate(value):
+                if isinstance(item, Mapping) and is_expression_node(item):
+                    validate_expression(
+                        item,
+                        lambda path, message, index=index: self._error(
+                            self.document_path + (field, index) + path, message
+                        ),
+                    )
+                elif not isinstance(item, Hashable):
+                    path = self.document_path + (field, index)
+                    self._error(path, 'Dependency must be a hashable type.')
 
     def _check_with_items(self, field, value):
         for i, schema in enumerate(value):

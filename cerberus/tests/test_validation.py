@@ -1137,6 +1137,143 @@ def test_dependencies_errors():
     )
 
 
+def test_declarative_dependencies_expression():
+    schema = {
+        'request': {
+            'dependencies': {
+                'any': [
+                    {'field': 'certificate'},
+                    {'all': [{'field': 'account'}, {'field': 'token'}]},
+                ]
+            }
+        },
+        'certificate': {'nullable': True},
+        'account': {'nullable': True},
+        'token': {'nullable': True},
+    }
+
+    assert_success({'request': 1, 'certificate': None}, schema)
+    assert_success({'request': 1, 'account': None, 'token': None}, schema)
+    assert_fail({'request': 1, 'account': None}, schema)
+    assert_fail({'request': 1}, schema)
+
+
+def test_declarative_dependencies_value_match():
+    schema = {
+        'request': {'dependencies': {'$field': 'mode', 'eq': 'secure'}},
+        'mode': {'nullable': True},
+    }
+
+    assert_success({'request': 1, 'mode': 'secure'}, schema)
+    assert_fail({'request': 1, 'mode': None}, schema)
+    assert_fail({'request': 1, 'mode': 'insecure'}, schema)
+
+
+def test_declarative_dependencies_not_and_null_value_match():
+    schema = {
+        'request': {'dependencies': {'not': {'field': 'disabled'}}},
+        'disabled': {'nullable': True},
+    }
+
+    assert_success({'request': 1}, schema)
+    assert_fail({'request': 1, 'disabled': None}, schema)
+
+    schema = {
+        'request': {'dependencies': {'$field': 'mode', 'eq': None}},
+        'mode': {'nullable': True},
+    }
+
+    assert_success({'request': 1, 'mode': None}, schema)
+    assert_fail({'request': 1}, schema)
+
+
+def test_dependencies_mapping_with_field_name_field_remains_compatible():
+    schema = {'x': {'dependencies': {'field': 'present'}}, 'field': {}}
+
+    assert_success({'x': 1, 'field': 'present'}, schema)
+    assert_fail({'x': 1, 'field': 'missing'}, schema)
+
+
+def test_declarative_dependencies_error_tree():
+    schema = {
+        'request': {
+            'dependencies': {
+                'any': [
+                    {'field': 'certificate'},
+                    {'all': [{'field': 'account'}, {'field': 'token'}]},
+                ]
+            }
+        },
+        'certificate': {},
+        'account': {},
+        'token': {},
+    }
+
+    validation_errors = assert_fail({'request': 1, 'account': 1}, schema)
+    error = validation_errors[0]
+    assert error.code == errors.DEPENDENCIES_EXPRESSION.code
+    assert error.schema_path == ('request', 'dependencies', 'any')
+
+    assert_has_error(
+        error.child_errors,
+        'request',
+        ('request', 'dependencies', 'any', 0, 'field'),
+        errors.DEPENDENCIES_FIELD,
+        'certificate',
+        ('certificate',),
+    )
+
+    all_error = [x for x in error.child_errors if x.schema_path[-1] == 'all'][0]
+    assert_has_error(
+        all_error.child_errors,
+        'request',
+        ('request', 'dependencies', 'any', 1, 'all', 1, 'field'),
+        errors.DEPENDENCIES_FIELD,
+        'token',
+        ('token',),
+    )
+
+
+def test_declarative_dependencies_in_nested_list():
+    record_schema = {
+        'request': {
+            'dependencies': {
+                'any': [
+                    {'field': 'certificate'},
+                    {'all': [{'field': 'account'}, {'field': 'token'}]},
+                ]
+            }
+        },
+        'certificate': {'nullable': True},
+        'account': {'nullable': True},
+        'token': {'nullable': True},
+    }
+    schema = {
+        'records': {
+            'type': 'list',
+            'schema': {'type': 'dict', 'schema': record_schema},
+        }
+    }
+
+    document = {
+        'records': [
+            {'request': 1, 'certificate': 'present'},
+            {'request': 1, 'account': 1},
+        ]
+    }
+    validation_errors = assert_fail(document, schema)
+    dependency_error = validation_errors[0].child_errors[0].child_errors[0]
+    assert dependency_error.document_path == ('records', 1, 'request')
+    assert dependency_error.schema_path == (
+        'records',
+        'schema',
+        'schema',
+        'request',
+        'dependencies',
+        'any',
+    )
+
+
 def test_options_passed_to_nested_validators(validator):
     validator.schema = {
         'sub_dict': {'type': 'dict', 'schema': {'foo': {'type': 'string'}}}

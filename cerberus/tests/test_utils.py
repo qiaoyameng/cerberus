@@ -1,4 +1,4 @@
-from cerberus.utils import compare_paths_lt
+from cerberus.utils import compare_paths_lt, mapping_hash
 
 
 def test_compare_paths():
@@ -9,3 +9,13 @@ def test_compare_paths():
     lesser += ('type',)
     greater += ('regex',)
     assert compare_paths_lt(lesser, greater)
+
+
+def test_mapping_hash_with_nested_sequences():
+    mapping_hash(
+        {
+            'dependencies': {
+                'all': [['field']],
+            }
+        }
+    )

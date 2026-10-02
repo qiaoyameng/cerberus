@@ -88,7 +88,7 @@ def test_validated_schema_cache():
     v = Validator({'foozifix': {'coerce': int}})
     assert len(v._valid_schemas) == cache_size
 
-    max_cache_size = 163
+    max_cache_size = 320
     assert cache_size <= max_cache_size, (
         "There's an unexpected high amount (%s) of cached valid "
         "definition schemas. Unless you added further tests, "
@@ -177,3 +177,45 @@ def test_anyof_check_with():
 
 def test_rulename_space_is_normalized():
     Validator(schema={"field": {"default setter": lambda x: x, "type": "string"}})
+
+
+def test_dependency_expression_schema_validation():
+    invalid_schemas = (
+        {'field': {'dependencies': {'all': []}}},
+        {'field': {'dependencies': {'any': 'field'}}},
+        {'field': {'dependencies': {'not': []}}},
+        {'field': {'dependencies': {'$field': 42}}},
+        {'field': {'dependencies': {'field': 'a', '$field': 'b'}}},
+        {'field': {'dependencies': {'all': [{'unknown': 'field'}]}}},
+        {
+            'field': {
+                'dependencies': {
+                    'all': [
+                        {'field': 'first'},
+                        {'any': []},
+                    ]
+                }
+            }
+        },
+    )
+
+    for schema in invalid_schemas:
+        with pytest.raises(SchemaError):
+            Validator(schema)
+
+    schema = {
+        'field': {
+            'dependencies': {
+                'all': [
+                    {'field': 'valid'},
+                    {'any': []},
+                    {'field': 42},
+                ]
+            }
+        }
+    }
+    with pytest.raises(SchemaError) as exc_info:
+        Validator(schema)
+    message = str(exc_info.value)
+    assert "('field', 'dependencies', 'all', 1, 'any')" in message
+    assert "('field', 'dependencies', 'all', 2, 'field')" in message
