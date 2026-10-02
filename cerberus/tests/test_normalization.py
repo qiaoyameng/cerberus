@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from copy import deepcopy
+from itertools import permutations
 from tempfile import NamedTemporaryFile
 
 from pytest import mark
@@ -541,3 +542,151 @@ def test_defaults_in_allow_unknown_schema():
         'plugin_foo': {'package': 'foo', 'cfg_path': 'cfg.yaml'},
     }
     assert_normalized(document, expected, schema, validator)
+
+
+def _shuffled_copies(mapping):
+    """Yields copies of a mapping with all possible insertion orders."""
+    items = list(mapping.items())
+    for permutation in permutations(items):
+        yield dict(permutation)
+
+
+def _assert_simultaneous_rename_invariant(document, schema, expected, expected_errors):
+    """Asserts that all insertion orders of a document yield the same
+    normalized result and the same errors in simultaneous rename mode."""
+    for shuffled in _shuffled_copies(document):
+        validator = Validator(simultaneous_rename=True)
+        validator.normalized(shuffled, schema, always_return_document=True)
+        assert validator.document == expected
+        actual_errors = [
+            (error.document_path, error.code, error.info)
+            for error in validator._errors
+        ]
+        assert actual_errors == expected_errors
+
+
+def test_simultaneous_rename_swap():
+    schema = {'a': {'rename': 'b'}, 'b': {'rename': 'a'}}
+    document = {'a': 1, 'b': 2}
+    expected = {'a': 2, 'b': 1}
+    _assert_simultaneous_rename_invariant(document, schema, expected, [])
+
+
+def test_simultaneous_rename_cycle():
+    schema = {
+        'a': {'rename': 'b'},
+        'b': {'rename': 'c'},
+        'c': {'rename': 'a'},
+    }
+    document = {'a': 1, 'b': 2, 'c': 3}
+    expected = {'a': 3, 'b': 1, 'c': 2}
+    _assert_simultaneous_rename_invariant(document, schema, expected, [])
+
+
+def test_simultaneous_rename_chain():
+    schema = {'a': {'rename': 'b'}, 'b': {'rename': 'c'}}
+    document = {'a': 1, 'b': 2}
+    expected = {'b': 1, 'c': 2}
+    _assert_simultaneous_rename_invariant(document, schema, expected, [])
+
+
+def test_simultaneous_rename_merge_conflict():
+    schema = {'a': {'rename': 'x'}, 'b': {'rename': 'x'}}
+    document = {'a': 1, 'b': 2}
+    expected_errors = [
+        (('a',), errors.RENAMING_CONFLICT.code, ('x', ('a', 'b'))),
+        (('b',), errors.RENAMING_CONFLICT.code, ('x', ('a', 'b'))),
+    ]
+    _assert_simultaneous_rename_invariant(
+        document, schema, document, expected_errors
+    )
+
+    validator = Validator(simultaneous_rename=True)
+    assert_fail(document, schema, validator)
+    assert_has_error(
+        validator._errors,
+        ('a',),
+        (),
+        errors.RENAMING_CONFLICT,
+        None,
+        ('x', ('a', 'b')),
+    )
+    assert_has_error(
+        validator._errors,
+        ('b',),
+        (),
+        errors.RENAMING_CONFLICT,
+        None,
+        ('x', ('a', 'b')),
+    )
+
+
+def test_simultaneous_rename_existing_target_conflict():
+    schema = {'a': {'rename': 'b'}}
+    document = {'a': 1, 'b': 2}
+    expected_errors = [
+        (('a',), errors.RENAMING_CONFLICT.code, ('b', ('a', 'b'))),
+    ]
+    _assert_simultaneous_rename_invariant(
+        document, schema, document, expected_errors
+    )
+
+
+def test_simultaneous_rename_conflict_does_not_block_other_fields():
+    schema = {
+        'a': {'rename': 'x'},
+        'b': {'rename': 'x'},
+        'c': {'rename': 'd'},
+    }
+    document = {'a': 1, 'b': 2, 'c': 3}
+    expected = {'a': 1, 'b': 2, 'd': 3}
+    expected_errors = [
+        (('a',), errors.RENAMING_CONFLICT.code, ('x', ('a', 'b'))),
+        (('b',), errors.RENAMING_CONFLICT.code, ('x', ('a', 'b'))),
+    ]
+    _assert_simultaneous_rename_invariant(document, schema, expected, expected_errors)
+
+
+def test_simultaneous_rename_handler():
+    schema = {
+        'a': {'rename_handler': lambda name: name.upper()},
+        'B': {'rename': 'c'},
+    }
+    document = {'a': 1, 'B': 2}
+    expected = {'A': 1, 'c': 2}
+    _assert_simultaneous_rename_invariant(document, schema, expected, [])
+
+
+def test_simultaneous_rename_handler_exception():
+    def failing_handler(name):
+        raise ValueError('cannot handle this')
+
+    schema = {'a': {'rename_handler': failing_handler}}
+    document = {'a': 1}
+    expected_errors = [
+        (('a',), errors.RENAMING_FAILED.code, ('cannot handle this',)),
+    ]
+    _assert_simultaneous_rename_invariant(
+        document, schema, document, expected_errors
+    )
+
+
+def test_simultaneous_rename_nested_levels_are_planned_separately():
+    schema = {
+        'sub': {
+            'type': 'dict',
+            'schema': {'a': {'rename': 'b'}, 'b': {'rename': 'a'}},
+        }
+    }
+    document = {'sub': {'a': 1, 'b': 2}}
+    expected = {'sub': {'a': 2, 'b': 1}}
+    validator = Validator(simultaneous_rename=True)
+    assert_normalized(document, expected, schema, validator)
+
+
+def test_simultaneous_rename_is_disabled_by_default():
+    schema = {'a': {'rename': 'b'}, 'b': {'rename': 'a'}}
+    validator = Validator()
+    validator({'a': 1, 'b': 2}, schema)
+    # the sequential mode renames one field after another
+    assert validator.document == {'a': 1}

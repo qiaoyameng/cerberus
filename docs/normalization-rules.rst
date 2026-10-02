@@ -37,6 +37,27 @@ is processed through that chain.
    >>> v.normalized({1: 'foo'})
    {'01': 'foo'}
 
+By default fields are renamed sequentially in the order they appear in the
+document, so a renamed field can overwrite another one and renaming chains
+depend on that order. When the
+:attr:`~cerberus.Validator.simultaneous_rename` property of a
+:class:`~cerberus.Validator` instance is set to ``True``, all renamings of one
+mapping level are planned from its original state and applied at once. This
+allows swapping and rotating field names:
+
+.. doctest::
+
+   >>> schema = {'a': {'rename': 'b'}, 'b': {'rename': 'a'}}
+   >>> v = Validator(schema, simultaneous_rename=True)
+   >>> v.normalized({'a': 1, 'b': 2})
+   {'b': 1, 'a': 2}
+
+If multiple fields would be renamed to the same name -- including names that
+are already taken by other fields -- the ambiguity is reported as
+:attr:`~cerberus.errors.RENAMING_CONFLICT` error for each involved field
+before the mapping is changed, and the affected fields keep their names.
+Nested mappings are planned separately, each when its level is normalized.
+
 
 .. versionadded:: 1.0
 

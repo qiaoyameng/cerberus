@@ -93,6 +93,10 @@ class BareValidator(object):
     :param purge_readonly: Removes all fields that are defined as ``readonly`` in the
                            normalization phase.
     :type purge_readonly: :class:`bool`
+    :param simultaneous_rename: See
+                                :attr:`~cerberus.Validator.simultaneous_rename`.
+                                Defaults to ``False``.
+    :type simultaneous_rename: :class:`bool`
     :param error_handler: The error handler that formats the result of
                           :attr:`~cerberus.Validator.errors`.
                           When given as two-value tuple with an error-handler
@@ -146,6 +150,7 @@ class BareValidator(object):
         __init__(self, schema=None, ignore_none_values=False,
                  allow_unknown=False, require_all=False,
                  purge_unknown=False, purge_readonly=False,
+                 simultaneous_rename=False,
                  error_handler=errors.BasicErrorHandler)
         """
 
@@ -215,6 +220,7 @@ class BareValidator(object):
             'require_all',
             'purge_unknown',
             'purge_readonly',
+            'simultaneous_rename',
         )
         for i, p in enumerate(signature[: len(args)]):
             if p in kwargs:
@@ -530,6 +536,24 @@ class BareValidator(object):
     @purge_readonly.setter
     def purge_readonly(self, value):
         self._config['purge_readonly'] = value
+
+    @property
+    def simultaneous_rename(self):
+        """
+        If ``True``, the fields of a mapping are renamed simultaneously: All
+        target names are planned from the mapping's original state before any
+        change is applied to it. This allows swapping and rotating field names
+        and detects ambiguous renamings that would silently drop values in the
+        default, sequential mode. Conflicts are reported as
+        :attr:`~cerberus.errors.RENAMING_CONFLICT` errors and the affected
+        fields are left untouched.
+        Type: :class:`bool`
+        """
+        return self._config.get('simultaneous_rename', False)
+
+    @simultaneous_rename.setter
+    def simultaneous_rename(self, value):
+        self._config['simultaneous_rename'] = value
 
     @property
     def root_allow_unknown(self):
@@ -898,6 +922,8 @@ class BareValidator(object):
         return mapping
 
     def __normalize_rename_fields(self, mapping, schema):
+        if self.simultaneous_rename:
+            return self.__normalize_rename_fields_simultaneously(mapping, schema)
         for field in tuple(mapping):
             if field in schema:
                 self._normalize_rename(mapping, schema, field)
@@ -910,6 +936,67 @@ class BareValidator(object):
                     mapping, {field: self.allow_unknown}, field
                 )
         return mapping
+
+    def __normalize_rename_fields_simultaneously(self, mapping, schema):
+        """Plan all renamings of one mapping level from its original state and
+        apply them at once. Ambiguous target names are reported before the
+        mapping is changed and the affected fields keep their names."""
+        plan = {}
+        for field in tuple(mapping):
+            if field in schema:
+                rules = schema[field]
+            elif (
+                isinstance(self.allow_unknown, Mapping)
+                and 'rename_handler' in self.allow_unknown
+            ):
+                rules = self.allow_unknown
+            else:
+                continue
+            target = self.__rename_target(rules, field)
+            if target != field:
+                plan[field] = target
+
+        occupants = {}
+        for field in mapping:
+            if field not in plan:
+                occupants.setdefault(field, []).append(field)
+        for source, target in plan.items():
+            occupants.setdefault(target, []).append(source)
+
+        for target in sorted(occupants, key=self.__rename_sort_key):
+            sources = occupants[target]
+            if len(sources) < 2:
+                continue
+            sources = sorted(sources, key=self.__rename_sort_key)
+            for source in sources:
+                if source not in plan:
+                    continue
+                del plan[source]
+                self._error(
+                    source, errors.RENAMING_CONFLICT, target, tuple(sources)
+                )
+
+        values = {}
+        for source in plan:
+            values[source] = mapping[source]
+            del mapping[source]
+        for source in sorted(plan, key=self.__rename_sort_key):
+            mapping[plan[source]] = values[source]
+        return mapping
+
+    @staticmethod
+    def __rename_sort_key(name):
+        """A deterministic order for hashable field names of any type."""
+        return (str(type(name)), str(name))
+
+    def __rename_target(self, rules, field):
+        if 'rename' in rules:
+            return rules['rename']
+        if 'rename_handler' in rules:
+            return self.__normalize_coerce(
+                rules['rename_handler'], field, field, False, errors.RENAMING_FAILED
+            )
+        return field
 
     def _normalize_rename(self, mapping, schema, field):
         """{'type': 'hashable'}"""

@@ -1,6 +1,19 @@
 Cerberus Changelog
 ==================
 
+Unreleased
+----------
+
+New
+~~~
+
+- Optional simultaneous renaming of fields, enabled with the
+  ``simultaneous_rename`` property of a ``Validator``. Renamings of a mapping
+  level are planned from its original state, which supports swapping and
+  rotating field names and reports ambiguous target names as
+  ``RENAMING_CONFLICT`` errors before the document is changed.
+
+
 Version 1.3.8
 -------------
 
