@@ -55,6 +55,9 @@ UNALLOWED_VALUES = ErrorDefinition(0x45, 'allowed')
 FORBIDDEN_VALUE = ErrorDefinition(0x46, 'forbidden')
 FORBIDDEN_VALUES = ErrorDefinition(0x47, 'forbidden')
 MISSING_MEMBERS = ErrorDefinition(0x48, 'contains')
+DUPLICATE_IDENTITY = ErrorDefinition(0x49, 'duplicate_identity')
+MISSING_REFERENCE = ErrorDefinition(0x4A, 'exists')
+INVALID_IDENTITY = ErrorDefinition(0x4B, 'identity')
 
 # other
 NORMALIZATION = ErrorDefinition(0x60, None)
@@ -62,7 +65,6 @@ COERCION_FAILED = ErrorDefinition(0x61, 'coerce')
 RENAMING_FAILED = ErrorDefinition(0x62, 'rename_handler')
 READONLY_FIELD = ErrorDefinition(0x63, 'readonly')
 SETTING_DEFAULT_FAILED = ErrorDefinition(0x64, 'default_setter')
-
 # groups
 ERROR_GROUP = ErrorDefinition(0x80, None)
 MAPPING_SCHEMA = ErrorDefinition(0x81, 'schema')
@@ -190,6 +192,37 @@ class ValidationError(object):
     def is_normalization_error(self):
         """``True`` for normalization errors."""
         return bool(self.code & NORMALIZATION.code)
+
+
+class BatchValidationError(ValidationError):
+    """An error related to a document in a batch."""
+
+    def __init__(
+        self,
+        document_index,
+        field_path,
+        code,
+        rule,
+        constraint,
+        value,
+        info=(),
+        target=None,
+    ):
+        document_path = (document_index,)
+        if field_path:
+            document_path += tuple(field_path)
+        super(BatchValidationError, self).__init__(
+            document_path,
+            (rule,),
+            code,
+            rule,
+            constraint,
+            value,
+            info,
+        )
+        self.document_index = document_index
+        self.field_path = tuple(field_path or ())
+        self.target = target
 
 
 class ErrorList(list):
@@ -489,6 +522,9 @@ class BasicErrorHandler(BaseErrorHandler):
         0x46: "unallowed value {value}",
         0x47: "unallowed values {0}",
         0x48: "missing members {0}",
+        0x49: "duplicate identity, also found at indexes {0}",
+        0x4A: "missing reference target {value}",
+        0x4B: "invalid identity value",
         0x61: "field '{field}' cannot be coerced: {0}",
         0x62: "field '{field}' cannot be renamed: {0}",
         0x63: "field is read-only",

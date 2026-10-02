@@ -1,7 +1,7 @@
 from __future__ import absolute_import
 
 from ast import literal_eval
-from copy import copy
+from copy import copy, deepcopy
 from datetime import date, datetime
 import re
 from warnings import warn
@@ -1061,6 +1061,587 @@ class BareValidator(object):
             return None
         else:
             return self.document
+
+    def validate_batch(
+        self,
+        documents,
+        schema=None,
+        identity_fields=None,
+        references=None,
+        external_ids=None,
+        allowed_external_ids=None,
+        update=False,
+    ):
+        """
+        Normalizes and validates an ordered batch of mappings.
+
+        ``identity_fields`` declares one field or an iterable of fields that
+        identify a record. A tuple used as a field specification denotes a
+        nested path, while a list denotes the parts of a composite identity.
+
+        ``references`` declares reference fields. A field specification may be
+        a path as string or tuple, or a mapping containing ``path`` and
+        ``fields``. A reference field may contain one scalar, one composite
+        value (mapping or tuple), or a list of those values.
+        ``external_ids`` provides target values that are allowed to be absent
+        from the batch; a reference specification may provide its own set with
+        the same key.
+
+        The resulting errors are exposed by :attr:`_errors` as for
+        :meth:`validate`, with each document path prefixed by its input index.
+
+        :return: ``True`` when every document and reference is valid.
+        :rtype: :class:`bool`
+        """
+        if not isinstance(documents, Sequence) or isinstance(
+            documents, (_str_type, bytes)
+        ):
+            raise TypeError('documents must be a sequence of mappings')
+
+        identity_fields = self._parse_identity_fields(identity_fields)
+        reference_fields = self._parse_reference_fields(references)
+        if external_ids is None:
+            external_ids = allowed_external_ids
+        global_external_ids = self._external_identity_keys(external_ids, None)
+
+        self._errors = errors.ErrorList()
+        self.recent_error = None
+        self.document_error_tree = errors.DocumentErrorTree()
+        self.schema_error_tree = errors.SchemaErrorTree()
+        self.error_handler.start(self)
+        self.document = None
+        self.valid_documents = []
+        self.batch_errors = errors.ErrorList()
+
+        records = []
+        batch_errors = errors.ErrorList()
+
+        for index, source_document in enumerate(documents):
+            if not isinstance(source_document, Mapping):
+                normalized_document = None
+                record_errors = errors.ErrorList(
+                    [
+                        errors.BatchValidationError(
+                            index,
+                            (),
+                            errors.DOCUMENT_FORMAT.code,
+                            errors.DOCUMENT_FORMAT.rule,
+                            None,
+                            source_document,
+                        )
+                    ]
+                )
+            else:
+                validator = self._get_batch_validator(schema)
+                normalized_document = validator.normalized(
+                    deepcopy(source_document), always_return_document=True
+                )
+                record_errors = errors.ErrorList(
+                    self._prefix_error_paths(index, validator._errors)
+                )
+
+                validator.validate(
+                    normalized_document, normalize=False, update=update
+                )
+                record_errors.extend(
+                    self._prefix_error_paths(index, validator._errors)
+                )
+
+            batch_errors.extend(record_errors)
+            records.append(
+                {
+                    'document': normalized_document,
+                    'errors': record_errors,
+                    'valid': not record_errors,
+                }
+            )
+
+        index_by_identity = {}
+        for index, record in enumerate(records):
+            document = record['document']
+            if document is None or not identity_fields:
+                continue
+
+            identity, identity_errors = self._get_record_identity(
+                index, document, identity_fields, record['errors']
+            )
+            batch_errors.extend(identity_errors)
+            if identity is not None:
+                index_by_identity.setdefault(identity, []).append(index)
+
+        for identity, indexes in index_by_identity.items():
+            if len(indexes) > 1:
+                conflicting_indexes = tuple(indexes)
+                for index in indexes:
+                    batch_errors.append(
+                        errors.BatchValidationError(
+                            index,
+                            (),
+                            errors.DUPLICATE_IDENTITY.code,
+                            errors.DUPLICATE_IDENTITY.rule,
+                            tuple(field['field'] for field in identity_fields),
+                            identity,
+                            (conflicting_indexes,),
+                            target=conflicting_indexes,
+                        )
+                    )
+
+        known_identities = set(index_by_identity)
+        for index, record in enumerate(records):
+            document = record['document']
+            if document is None:
+                continue
+            for reference in reference_fields:
+                allowed_external_ids = set(global_external_ids)
+                allowed_external_ids.update(
+                    self._external_identity_keys(
+                        reference.get('external_ids'), identity_fields
+                    )
+                )
+                batch_errors.extend(
+                    self._get_reference_errors(
+                        index,
+                        document,
+                        reference,
+                        identity_fields,
+                        known_identities,
+                        allowed_external_ids,
+                    )
+                )
+
+        batch_errors.sort()
+        self.batch_errors = batch_errors
+        self._errors = batch_errors
+        for error in batch_errors:
+            self.document_error_tree.add(error)
+            self.schema_error_tree.add(error)
+
+        self.valid_documents = [
+            record['document']
+            for index, record in enumerate(records)
+            if record['valid']
+            and not self._record_has_batch_error(batch_errors, index)
+        ]
+        self.error_handler.end(self)
+        return not bool(batch_errors)
+
+    def validated_batch(self, *args, **kwargs):
+        """
+        Wrapper around :meth:`validate_batch` that returns the normalized valid
+        documents in input order and all batch errors.
+        """
+        self.validate_batch(*args, **kwargs)
+        return self.valid_documents, self.batch_errors
+
+    validate_many = validate_batch
+
+    def validated_many(self, *args, **kwargs):
+        """Alias for :meth:`validated_batch`."""
+        return self.validated_batch(*args, **kwargs)
+
+    def _get_batch_validator(self, schema):
+        batch_schema = schema if schema is not None else self.schema
+        return self._get_child_validator(schema=batch_schema)
+
+    @staticmethod
+    def _parse_identity_fields(identity_fields):
+        if identity_fields is None:
+            return ()
+        if isinstance(identity_fields, tuple) and identity_fields and all(
+            isinstance(field, Mapping)
+            and {'path', 'field'} <= set(field)
+            for field in identity_fields
+        ):
+            return identity_fields
+        if isinstance(identity_fields, Mapping):
+            if 'path' in identity_fields:
+                return (
+                    BareValidator._parse_field_specification(identity_fields),
+                )
+            else:
+                return tuple(
+                    BareValidator._parse_field_specification(
+                        {'field': field, 'path': path}
+                    )
+                    for field, path in identity_fields.items()
+                )
+        if isinstance(identity_fields, _str_type):
+            specifications = (identity_fields,)
+        elif isinstance(identity_fields, tuple):
+            specifications = (identity_fields,)
+        else:
+            specifications = tuple(identity_fields)
+
+        return tuple(
+            BareValidator._parse_field_specification(x)
+            for x in specifications
+        )
+
+    @staticmethod
+    def _parse_field_specification(specification, default_field=None):
+        if isinstance(specification, Mapping):
+            path = specification['path']
+            field = specification.get(
+                'field',
+                default_field if default_field is not None else path[-1],
+            )
+        else:
+            path = specification
+            field = default_field
+        if isinstance(path, _str_type):
+            path = (path,)
+        elif isinstance(path, list):
+            path = tuple(path)
+        if field is None:
+            field = default_field if default_field is not None else path[-1]
+        return {'path': tuple(path), 'field': field}
+
+    def _parse_reference_fields(self, references):
+        if references is None:
+            return ()
+        if isinstance(references, Mapping) and not self._is_reference_specification(
+            references
+        ):
+            specifications = tuple(
+                self._merge_reference_path(path, config)
+                for path, config in references.items()
+            )
+        else:
+            specifications = references
+
+        if isinstance(specifications, Mapping):
+            specifications = (specifications,)
+        elif isinstance(specifications, (_str_type, tuple)):
+            specifications = (specifications,)
+        else:
+            specifications = tuple(specifications)
+
+        return tuple(self._parse_reference_specification(x) for x in specifications)
+
+    @staticmethod
+    def _is_reference_specification(specification):
+        return isinstance(specification, Mapping) and (
+            'path' in specification or 'fields' in specification
+        )
+
+    @staticmethod
+    def _as_reference_specification(path):
+        if isinstance(path, _str_type):
+            path = (path,)
+        return {'path': tuple(path)}
+
+    def _parse_reference_specification(self, specification):
+        if not isinstance(specification, Mapping):
+            specification = self._as_reference_specification(specification)
+        specification = dict(specification)
+        path = specification.get('path')
+        if path is None:
+            fields = specification.get('fields')
+            if isinstance(fields, _str_type):
+                path = (fields,)
+            else:
+                path = ()
+        elif isinstance(path, _str_type):
+            path = (path,)
+        elif isinstance(path, list):
+            path = tuple(path)
+        specification['path'] = tuple(path)
+
+        fields = specification.get('fields')
+        if fields is not None:
+            specification['fields'] = self._parse_identity_fields(fields)
+        source_fields = specification.get('source_fields')
+        if source_fields is not None:
+            specification['source_fields'] = self._parse_identity_fields(
+                source_fields
+            )
+        return specification
+
+    @staticmethod
+    def _merge_reference_path(path, config):
+        if isinstance(path, _str_type):
+            path = (path,)
+        if not isinstance(config, Mapping):
+            config = {'external_ids': config}
+        result = dict(config)
+        result.setdefault('path', tuple(path))
+        return result
+
+    @staticmethod
+    def _external_identity_keys(values, identity_fields):
+        if values is None:
+            return set()
+        result = set()
+        for value in values:
+            if isinstance(value, Mapping):
+                value = tuple(value.get(field['field']) for field in identity_fields)
+            if isinstance(value, tuple):
+                if identity_fields is not None and len(identity_fields) == 1:
+                    result.add(BareValidator._identity_value(value[0]))
+                else:
+                    result.add(
+                        tuple(BareValidator._identity_value(item) for item in value)
+                    )
+            else:
+                result.add(BareValidator._identity_value(value))
+        return result
+
+    @staticmethod
+    def _identity_value(value):
+        if isinstance(value, tuple):
+            return tuple(BareValidator._identity_value(item) for item in value)
+        return type(value), value
+
+    @staticmethod
+    def _prefix_error_paths(index, errors):
+        result = []
+        for error in errors:
+            error = deepcopy(error)
+            error.document_path = (index,) + error.document_path
+            if error.info:
+                error.info = tuple(
+                    BareValidator._prefix_info_paths(index, item)
+                    for item in error.info
+                )
+            result.append(error)
+        return result
+
+    @staticmethod
+    def _prefix_info_paths(index, value):
+        if isinstance(value, errors.ValidationError):
+            return BareValidator._prefix_error_paths(index, [value])[0]
+        if isinstance(value, (list, tuple)):
+            result = [
+                BareValidator._prefix_info_paths(index, item) for item in value
+            ]
+            if isinstance(value, tuple):
+                return tuple(result)
+            return result
+        return value
+
+    def _get_record_identity(self, index, document, identity_fields, record_errors):
+        values = []
+        invalid = False
+        identity_errors = errors.ErrorList()
+
+        for field in identity_fields:
+            path = field['path']
+            exists, value = self._get_path(document, path)
+            has_field_error = self._errors_contain_path(record_errors, (index,) + path)
+
+            if not exists or value is None or not self._is_hashable(value):
+                invalid = True
+                if not has_field_error:
+                    identity_errors.append(
+                        errors.BatchValidationError(
+                            index,
+                            path,
+                            errors.INVALID_IDENTITY.code,
+                            errors.INVALID_IDENTITY.rule,
+                            path,
+                            value,
+                        )
+                    )
+            elif has_field_error:
+                invalid = True
+            else:
+                values.append(self._identity_value(value))
+
+        if invalid:
+            return None, identity_errors
+        if len(values) == 1:
+            return values[0], identity_errors
+        return tuple(values), identity_errors
+
+    @staticmethod
+    def _is_hashable(value):
+        if isinstance(value, (list, dict, set)):
+            return False
+        try:
+            hash(value)
+        except TypeError:
+            return False
+        return True
+
+    @staticmethod
+    def _get_path(document, path):
+        value = document
+        for part in path:
+            if isinstance(value, Mapping):
+                if part not in value:
+                    return False, None
+                value = value[part]
+            elif isinstance(value, Sequence) and not isinstance(
+                value, (_str_type, bytes)
+            ):
+                try:
+                    value = value[part]
+                except (IndexError, TypeError):
+                    return False, None
+            else:
+                return False, None
+        return True, value
+
+    @classmethod
+    def _errors_contain_path(cls, errors, path):
+        for error in errors:
+            if cls._error_matches_path(error, path):
+                return True
+        return False
+
+    @classmethod
+    def _error_matches_path(cls, error, path):
+        document_path = tuple(error.document_path)
+        if path[: len(document_path)] == document_path:
+            return True
+        if error.info:
+            for item in error.info:
+                if isinstance(item, errors.ValidationError) and cls._error_matches_path(
+                    item, path
+                ):
+                    return True
+                if isinstance(item, (list, tuple)):
+                    for child in item:
+                        if isinstance(
+                            child, errors.ValidationError
+                        ) and cls._error_matches_path(child, path):
+                            return True
+        return False
+
+    def _get_reference_errors(
+        self,
+        index,
+        document,
+        reference,
+        identity_fields,
+        known_identities,
+        external_ids,
+    ):
+        path = reference['path']
+        fields = self._parse_identity_fields(reference.get('fields'))
+        exists, value = self._get_path(document, path)
+        if not exists or value is None:
+            return errors.ErrorList()
+
+        result = errors.ErrorList()
+
+        def check(candidate, candidate_path):
+            if candidate is None:
+                return
+            if isinstance(candidate, list):
+                for item_index, item in enumerate(candidate):
+                    check(item, candidate_path + (item_index,))
+                return
+
+            target, malformed = self._reference_identity(
+                candidate,
+                fields or identity_fields,
+                document,
+                candidate_path,
+                self._parse_identity_fields(reference.get('source_fields')),
+            )
+            if target is None:
+                if not malformed:
+                    return
+                target_value = None
+            else:
+                target_value = candidate
+            if target is None or (
+                target not in known_identities and target not in external_ids
+            ):
+                result.append(
+                    errors.BatchValidationError(
+                        index,
+                        candidate_path,
+                        errors.MISSING_REFERENCE.code,
+                        errors.MISSING_REFERENCE.rule,
+                        reference,
+                        candidate,
+                        (candidate,),
+                        target=target_value,
+                    )
+                )
+
+        check(value, path)
+        return result
+
+    def _reference_identity(
+        self, candidate, fields, document, candidate_path, source_fields
+    ):
+        if not fields:
+            return None, True
+
+        if source_fields:
+            values = []
+            for source_field in source_fields:
+                exists, value = self._get_path(document, source_field['path'])
+                if not exists:
+                    exists, value = self._get_path(
+                        candidate, source_field['path']
+                    )
+                if not exists or value is None or not self._is_hashable(value):
+                    return None, True
+                values.append(self._identity_value(value))
+            if len(values) == 1:
+                return values[0], False
+            return tuple(values), False
+
+        if isinstance(candidate, Mapping):
+            values = []
+            for field in fields:
+                exists, value = self._get_path(candidate, field['path'])
+                if not exists:
+                    source_path = field.get('source_path')
+                    if source_path is not None:
+                        exists, value = self._get_path(document, source_path)
+                    else:
+                        exists, value = self._get_path(document, field['path'])
+                if not exists or value is None or not self._is_hashable(value):
+                    return None, True
+                values.append(self._identity_value(value))
+        elif isinstance(candidate, tuple) and len(candidate) == len(fields):
+            values = []
+            for value in candidate:
+                if value is None or not self._is_hashable(value):
+                    return None, True
+                values.append(self._identity_value(value))
+        elif len(fields) == 1:
+            field = fields[0]
+            if field.get('source') in ('value', True):
+                pass
+            else:
+                source_path = field.get('source_path', field['path'])
+                source_exists, source_value = self._get_path(document, source_path)
+                if source_exists and source_path != candidate_path:
+                    candidate = source_value
+            if not self._is_hashable(candidate):
+                return None, True
+            return self._identity_value(candidate), False
+        else:
+            values = []
+            for field in fields:
+                if field.get('source') in ('value', True):
+                    value = candidate
+                else:
+                    source_path = field.get('source_path', field['path'])
+                    exists, value = self._get_path(document, source_path)
+                    if not exists:
+                        return None, True
+                if value is None or not self._is_hashable(value):
+                    return None, True
+                values.append(self._identity_value(value))
+            return tuple(values), False
+
+        if len(values) == 1:
+            return values[0], False
+        return tuple(values), False
+
+    @staticmethod
+    def _record_has_batch_error(batch_errors, index):
+        return any(
+            error.document_path and error.document_path[0] == index
+            for error in batch_errors
+        )
 
     def __validate_unknown_fields(self, field):
         if self.allow_unknown:

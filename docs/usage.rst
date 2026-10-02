@@ -242,6 +242,41 @@ be caught and the validation with fail.
 
 .. versionadded:: 0.9
 
+`validated_batch` Method
+~~~~~~~~~~~~~~~~~~~~~~~~
+:meth:`~cerberus.Validator.validated_batch` normalizes every mapping of a
+sequence independently and then checks identity and reference constraints for
+the complete batch. Forward references and reference cycles are allowed. It
+returns the valid normalized documents in input order together with all errors.
+Each batch error's document path is prefixed by the source document's index.
+
+.. testcode::
+
+    schema = {
+        'tenant': {'type': 'string'},
+        'id': {'type': 'integer'},
+        'parent_id': {'type': 'integer', 'nullable': True},
+    }
+    v = Validator(schema)
+    documents = (
+        {'tenant': 'a', 'id': 2, 'parent_id': 1},
+        {'tenant': 'a', 'id': 1, 'parent_id': 1},
+    )
+    valid_documents, errors = v.validated_batch(
+        documents,
+        identity_fields=['tenant', 'id'],
+        references={
+            'path': 'parent_id',
+            'fields': ['id'],
+            'source_fields': ['tenant', ('parent_id',)],
+        },
+        external_ids=(('a', 99),),
+    )
+
+A string or a tuple denotes one field path, while a list denotes a composite
+identity. Reference values may be scalars, mappings, tuples, or lists of these
+values.
+
 `normalized` Method
 ~~~~~~~~~~~~~~~~~~~
 Similarly, the :meth:`~cerberus.Validator.normalized` method returns a
