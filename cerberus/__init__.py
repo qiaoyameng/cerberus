@@ -12,6 +12,12 @@ from __future__ import absolute_import
 
 from cerberus.platform import importlib_metadata
 from cerberus.schema import rules_set_registry, schema_registry, SchemaError
+from cerberus.reporting import (
+    NormalizationChange,
+    NormalizationReport,
+    PURGED,
+    UNSET,
+)
 from cerberus.utils import TypeDefinition
 from cerberus.validator import DocumentError, Validator
 
@@ -27,5 +33,9 @@ __all__ = [
     Validator.__name__,
     "schema_registry",
     "rules_set_registry",
+    "NormalizationChange",
+    "NormalizationReport",
+    "PURGED",
+    "UNSET",
     "__version__",
 ]

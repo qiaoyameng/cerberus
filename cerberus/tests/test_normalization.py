@@ -6,6 +6,7 @@ from tempfile import NamedTemporaryFile
 from pytest import mark
 
 from cerberus import Validator, errors
+from cerberus.reporting import NormalizationReport, PURGED, UNSET
 from cerberus.tests import (
     assert_fail,
     assert_has_error,
@@ -136,6 +137,181 @@ def test_custom_coerce_and_rename():
 
     v = MyNormalizer(3, allow_unknown={'rename_handler': 'multiply'})
     assert v.normalized({3: None}) == {9: None}
+
+
+def test_normalization_report_replays_rename_defaults_and_nested_coercion():
+    schema = {
+        'old_name': {'rename': 'name'},
+        'kind': {'type': 'string', 'default': 'purchase'},
+        'missing': {'type': 'string', 'default': 'fallback'},
+        'explicit_none': {'default': 'present', 'nullable': False},
+        'items': {
+            'type': 'list',
+            'schema': {
+                'type': 'dict',
+                'schema': {
+                    'qty': {'coerce': int},
+                    'label': {'default': 'item'},
+                },
+            },
+        },
+        'tags': {'type': 'list', 'items': [{'coerce': str}]},
+        'attributes': {
+            'type': 'dict',
+            'keysrules': {'rename_handler': str.upper},
+        },
+    }
+    document = {
+        'old_name': 'widget',
+        'explicit_none': None,
+        'items': [{'qty': '2'}],
+        'tags': [7],
+        'attributes': {'color': 'blue'},
+    }
+
+    replay_copy = deepcopy(document)
+    validator = Validator(schema, normalization_report=True)
+    normalized = validator.normalized(document)
+    report = validator.normalization_report
+
+    assert normalized == {
+        'name': 'widget',
+        'kind': 'purchase',
+        'missing': 'fallback',
+        'explicit_none': 'present',
+        'items': [{'qty': 2, 'label': 'item'}],
+        'tags': ['7'],
+        'attributes': {'COLOR': 'blue'},
+    }
+    assert isinstance(report, NormalizationReport)
+    assert [change.op for change in report] == [
+        'rename',
+        'default',
+        'default',
+        'default',
+        'default',
+        'coerce',
+        'coerce',
+        'rename',
+    ]
+
+    assert report[0].path == ('old_name',)
+    assert report[0].new_path == ('name',)
+    assert report[0].original_path == ('old_name',)
+    assert report[0].schema_path == ('old_name', 'rename')
+    assert report[1].old is UNSET
+    assert report[3].old is None
+    assert report[7].target == 'key'
+    assert report[7].path == ('attributes', 'color')
+    assert report[7].new_path == ('attributes', 'COLOR')
+    assert report[5].path == ('items', 0, 'qty')
+    assert report[5].original_path == ('items', 0, 'qty')
+    assert report[5].schema_path == (
+        'items',
+        'schema',
+        0,
+        'schema',
+        'qty',
+        'coerce',
+    )
+    assert report[4].path == ('items', 0, 'label')
+    assert report[6].path == ('tags', 0)
+    assert report[6].schema_path == ('tags', 'items', 0, 'coerce')
+    assert report.replay(replay_copy) == normalized
+
+
+def test_normalization_report_distinguishes_purged_from_missing():
+    schema = {'name': {'type': 'string'}}
+    validator = Validator(schema, purge_unknown=True, normalization_report=True)
+
+    normalized = validator.normalized({'name': 'widget', 'junk': 'gone'})
+
+    assert normalized == {'name': 'widget'}
+    assert len(validator.normalization_report) == 1
+    change = validator.normalization_report[0]
+    assert change.op == 'purge'
+    assert change.path == ('junk',)
+    assert change.old == 'gone'
+    assert change.new is PURGED
+
+
+def test_normalization_report_for_unknown_rename_handler():
+    validator = Validator(
+        {}, allow_unknown={'rename_handler': int}, normalization_report=True
+    )
+
+    assert validator.normalized({'5': 'value'}) == {5: 'value'}
+    change = validator.normalization_report[0]
+    assert change.op == 'rename'
+    assert change.path == ('5',)
+    assert change.new_path == (5,)
+    assert change.schema_path == ('__allow_unknown__', 'rename_handler')
+
+
+def test_normalization_report_replay_handles_list_indexes_after_purge():
+    report = NormalizationReport(
+        [
+            {
+                'op': 'purge',
+                'path': ('things', 0),
+                'original_path': ('things', 0),
+                'schema_path': ('things',),
+                'old': 'removed',
+                'new': PURGED,
+            },
+            {
+                'op': 'coerce',
+                'path': ('things', 1),
+                'original_path': ('things', 1),
+                'schema_path': ('things', 'schema', 1, 'coerce'),
+                'old': '1',
+                'new': 1,
+            },
+        ]
+    )
+
+    assert report.replay({'things': ['removed', '1']}) == {'things': [1]}
+
+
+def test_failed_coercion_reports_only_completed_actions():
+    def fail(value):
+        raise ValueError('boom')
+
+    schema = {
+        'first': {'coerce': str.upper},
+        'second': {'coerce': (int, fail)},
+    }
+    document = {'first': 'ok', 'second': '1'}
+    validator = Validator(schema, normalization_report=True)
+
+    assert validator.normalized(document) is None
+    assert [change.path for change in validator.normalization_report] == [
+        ('first',),
+        ('second',),
+    ]
+    assert validator.normalization_report[-1].old == '1'
+    assert validator.normalization_report[-1].new == 1
+    assert validator.normalization_report.replay(document) == {
+        'first': 'OK',
+        'second': 1,
+    }
+
+
+def test_disabled_normalization_report_preserves_failure_result_and_errors():
+    schema = {'things': {'type': 'list', 'items': [{'coerce': int}]}}
+    document = {'things': ['bad']}
+    validator = Validator(schema)
+
+    assert validator.validated(deepcopy(document)) is None
+    assert validator.normalization_report is None
+    validator._errors[0].info = ()
+    assert_has_error(
+        validator._errors,
+        ('things', 0),
+        ('things', 'items', 'coerce'),
+        errors.COERCION_FAILED,
+        int,
+    )
 
 
 def test_coerce_chain():

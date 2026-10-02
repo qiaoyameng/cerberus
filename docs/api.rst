@@ -9,6 +9,7 @@ Validator Class
             document_path, _drop_remaining_rules, _error, error_handler,
             _errors, errors, _get_child_validator, ignore_none_values,
             is_child, _lookup_field, mandatory_validations, normalized,
+            normalization_report,
             priority_validations, purge_unknown, recent_error,
             require_all, _remaining_rules, root_allow_unknown, root_document,
             root_require_all, root_schema, rules_set_registry, schema,
@@ -27,6 +28,19 @@ Type Definitions
 ----------------
 
 .. autoclass:: cerberus.TypeDefinition
+
+
+Normalization Reports
+---------------------
+
+.. autoclass:: cerberus.reporting.NormalizationReport
+  :members: actions, append, original_path, record, replay
+
+.. autoclass:: cerberus.reporting.NormalizationChange
+  :members:
+
+.. autodata:: cerberus.reporting.UNSET
+.. autodata:: cerberus.reporting.PURGED
 
 
 Error Handlers

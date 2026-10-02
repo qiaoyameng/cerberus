@@ -17,6 +17,11 @@ from cerberus.platform import (
     Sequence,
     Sized,
 )
+from cerberus.reporting import (
+    NormalizationReport,
+    PURGED as PURGED_VALUE,
+    UNSET as UNSET_VALUE,
+)
 from cerberus.schema import (
     schema_registry,
     rules_set_registry,
@@ -93,6 +98,8 @@ class BareValidator(object):
     :param purge_readonly: Removes all fields that are defined as ``readonly`` in the
                            normalization phase.
     :type purge_readonly: :class:`bool`
+    :param normalization_report: When ``True``, collect normalization changes.
+    :type normalization_report: :class:`bool`
     :param error_handler: The error handler that formats the result of
                           :attr:`~cerberus.Validator.errors`.
                           When given as two-value tuple with an error-handler
@@ -146,6 +153,7 @@ class BareValidator(object):
         __init__(self, schema=None, ignore_none_values=False,
                  allow_unknown=False, require_all=False,
                  purge_unknown=False, purge_readonly=False,
+                 normalization_report=False,
                  error_handler=errors.BasicErrorHandler)
         """
 
@@ -215,6 +223,7 @@ class BareValidator(object):
             'require_all',
             'purge_unknown',
             'purge_readonly',
+            'normalization_report',
         )
         for i, p in enumerate(signature[: len(args)]):
             if p in kwargs:
@@ -225,6 +234,16 @@ class BareValidator(object):
         """ This dictionary holds the configuration arguments that were used to
             initialize the :class:`Validator` instance except the
             ``error_handler``. """
+
+    @property
+    def normalization_report(self):
+        """The changes recorded for the most recent normalization."""
+        report = self._config.get('normalization_report', False)
+        return report if isinstance(report, NormalizationReport) else None
+
+    @normalization_report.setter
+    def normalization_report(self, value):
+        self._config['normalization_report'] = value
 
     @classmethod
     def clear_caches(cls):
@@ -629,6 +648,13 @@ class BareValidator(object):
         self.recent_error = None
         self.document_error_tree = errors.DocumentErrorTree()
         self.schema_error_tree = errors.SchemaErrorTree()
+        if not self.is_child:
+            report = self._config.get('normalization_report', False)
+            if report is True:
+                self._config['normalization_report'] = NormalizationReport()
+            elif isinstance(report, NormalizationReport):
+                report.changes.clear()
+                report._renames.clear()
         self.document = copy(document)
         if not self.is_child:
             self._is_normalized = False
@@ -662,6 +688,44 @@ class BareValidator(object):
             self._remaining_rules = []
 
     # # Normalizing
+
+    @property
+    def _active_normalization_report(self):
+        report = self._config.get('normalization_report', False)
+        return report if isinstance(report, NormalizationReport) else None
+
+    def _record_normalization_change(
+        self,
+        op,
+        field,
+        schema_crumb,
+        old=UNSET_VALUE,
+        new=UNSET_VALUE,
+        original_path=None,
+        new_path=None,
+        target='value',
+    ):
+        report = self._active_normalization_report
+        if report is None:
+            return
+        if isinstance(field, tuple):
+            path = self.document_path + field
+        else:
+            path = self.document_path + (field,)
+        if isinstance(schema_crumb, tuple):
+            schema_path = self.schema_path + schema_crumb
+        else:
+            schema_path = self.schema_path + (schema_crumb,)
+        report.record(
+            op,
+            path,
+            schema_path,
+            old=old,
+            new=new,
+            original_path=original_path,
+            new_path=new_path,
+            target=target,
+        )
 
     def normalized(self, document, schema=None, always_return_document=False):
         """
@@ -723,24 +787,53 @@ class BareValidator(object):
         error = errors.COERCION_FAILED
         for field in mapping:
             if field in schema and 'coerce' in schema[field]:
-                mapping[field] = self.__normalize_coerce(
-                    schema[field]['coerce'],
+                self.__apply_coercion(
+                    mapping,
                     field,
-                    mapping[field],
+                    schema[field]['coerce'],
                     schema[field].get('nullable', False),
                     error,
+                    (field, 'coerce'),
                 )
             elif (
                 isinstance(self.allow_unknown, Mapping)
                 and 'coerce' in self.allow_unknown
             ):
-                mapping[field] = self.__normalize_coerce(
-                    self.allow_unknown['coerce'],
+                self.__apply_coercion(
+                    mapping,
                     field,
-                    mapping[field],
+                    self.allow_unknown['coerce'],
                     self.allow_unknown.get('nullable', False),
                     error,
+                    (
+                        ('__allow_unknown__', 'coerce')
+                        if not self.is_child
+                        else ('allow_unknown', 'coerce')
+                    ),
                 )
+
+    def __apply_coercion(
+        self, mapping, field, processor, nullable, error, schema_crumb
+    ):
+        if isinstance(processor, Iterable) and not isinstance(
+            processor, _str_type
+        ):
+            processors = processor
+        else:
+            processors = (processor,)
+        for step in processors:
+            old_value = mapping[field]
+            new_value, success = self.__normalize_coerce(
+                step, field, old_value, nullable, error
+            )
+            if not success:
+                return False
+            if new_value is not old_value:
+                mapping[field] = new_value
+                self._record_normalization_change(
+                    'coerce', field, schema_crumb, old_value, new_value
+                )
+        return True
 
     def __normalize_coerce(self, processor, field, value, nullable, error):
         if isinstance(processor, _str_type):
@@ -749,22 +842,19 @@ class BareValidator(object):
         elif isinstance(processor, Iterable):
             result = value
             for p in processor:
-                result = self.__normalize_coerce(p, field, result, nullable, error)
-                if (
-                    errors.COERCION_FAILED
-                    in self.document_error_tree.fetch_errors_from(
-                        self.document_path + (field,)
-                    )
-                ):
-                    break
-            return result
+                result, success = self.__normalize_coerce(
+                    p, field, result, nullable, error
+                )
+                if not success:
+                    return result, False
+            return result, True
 
         try:
-            return processor(value)
+            return processor(value), True
         except Exception as e:
             if not (nullable and value is None):
                 self._error(field, error, str(e))
-            return value
+            return value, False
 
     def __normalize_containers(self, mapping, schema):
         for field in mapping:
@@ -798,35 +888,70 @@ class BareValidator(object):
                     self.__normalize_sequence_per_items(field, mapping, schema)
 
     def __normalize_mapping_per_keysrules(self, field, mapping, property_rules):
+        original_mapping = mapping[field]
         schema = dict(((k, property_rules) for k in mapping[field]))
         document = dict(((k, k) for k in mapping[field]))
+        temp_report = NormalizationReport()
         validator = self._get_child_validator(
-            document_crumb=field, schema_crumb=(field, 'keysrules'), schema=schema
+            document_crumb=field,
+            schema_crumb=(field, 'keysrules'),
+            schema=schema,
+            normalization_report=temp_report,
         )
         result = validator.normalized(document, always_return_document=True)
         if validator._errors:
             self._drop_nodes_from_errorpaths(validator._errors, [], [2, 4])
             self._error(validator._errors)
-        for k in result:
-            if k == result[k]:
+        key_changes = [
+            change for change in temp_report if change.op in ('coerce', 'rename')
+        ]
+        for source_change in key_changes:
+            old_key = source_change['path'][-1]
+            new_key = (
+                source_change['new_path'][-1]
+                if source_change.get('new_path') is not None
+                else source_change['new']
+            )
+            key_op = (
+                source_change['op']
+                if source_change.get('new_path') is not None
+                else 'coerce'
+            )
+            if old_key not in original_mapping:
                 continue
-            if result[k] in mapping[field]:
+            if new_key in original_mapping:
                 warn(
                     "Normalizing keys of {path}: {key} already exists, "
                     "its value is replaced.".format(
                         path='.'.join(str(x) for x in self.document_path + (field,)),
-                        key=k,
+                        key=old_key,
                     )
                 )
-                mapping[field][result[k]] = mapping[field][k]
+                mapping[field][new_key] = original_mapping[old_key]
+                keep_source = True
             else:
-                mapping[field][result[k]] = mapping[field][k]
-                del mapping[field][k]
+                mapping[field][new_key] = original_mapping[old_key]
+                del mapping[field][old_key]
+                keep_source = False
+            self._record_normalization_change(
+                key_op,
+                (field, old_key),
+                (field, 'keysrules') + source_change['schema_path'][2:],
+                old=old_key,
+                new=new_key,
+                original_path=self.document_path + (field, old_key),
+                new_path=self.document_path + (field, new_key),
+                target='key',
+            )
+            if keep_source:
+                self._active_normalization_report[-1]['keep_source'] = True
 
     def __normalize_mapping_per_valuesrules(self, field, mapping, value_rules):
         schema = dict(((k, value_rules) for k in mapping[field]))
         validator = self._get_child_validator(
-            document_crumb=field, schema_crumb=(field, 'valuesrules'), schema=schema
+            document_crumb=field,
+            schema_crumb=(field, 'valuesrules'),
+            schema=schema,
         )
         mapping[field] = validator.normalized(
             mapping[field], always_return_document=True
@@ -859,7 +984,9 @@ class BareValidator(object):
         )
         document = dict((k, v) for k, v in enumerate(mapping[field]))
         validator = self._get_child_validator(
-            document_crumb=field, schema_crumb=(field, 'schema'), schema=schema
+            document_crumb=field,
+            schema_crumb=(field, 'schema'),
+            schema=schema,
         )
         value_type = type(mapping[field])
         result = validator.normalized(document, always_return_document=True)
@@ -875,7 +1002,9 @@ class BareValidator(object):
         schema = dict(((k, v) for k, v in enumerate(rules)))
         document = dict((k, v) for k, v in enumerate(values))
         validator = self._get_child_validator(
-            document_crumb=field, schema_crumb=(field, 'items'), schema=schema
+            document_crumb=field,
+            schema_crumb=(field, 'items'),
+            schema=schema,
         )
         value_type = type(mapping[field])
         result = validator.normalized(document, always_return_document=True)
@@ -884,17 +1013,46 @@ class BareValidator(object):
             self._drop_nodes_from_errorpaths(validator._errors, [], [2])
             self._error(validator._errors)
 
-    @staticmethod
-    def __normalize_purge_readonly(mapping, schema):
+    def __normalize_purge_readonly(self, mapping, schema):
         for field in [x for x in mapping if schema.get(x, {}).get('readonly', False)]:
-            mapping.pop(field)
+            value = mapping.pop(field)
+            report = self._active_normalization_report
+            self._record_normalization_change(
+                'purge',
+                field,
+                (field, 'readonly'),
+                old=value,
+                new=PURGED_VALUE,
+                original_path=(
+                    report.original_path(self.document_path + (field,))
+                    if report is not None
+                    else None
+                ),
+            )
         return mapping
 
-    @staticmethod
-    def _normalize_purge_unknown(mapping, schema):
+    def _normalize_purge_unknown(self, mapping, schema):
         """{'type': 'boolean'}"""
         for field in [x for x in mapping if x not in schema]:
-            mapping.pop(field)
+            value = mapping.pop(field)
+            report = self._active_normalization_report
+            schema_crumb = (
+                ('__allow_unknown__',)
+                if not self.is_child
+                else ('allow_unknown',)
+            )
+            self._record_normalization_change(
+                'purge',
+                field,
+                schema_crumb,
+                old=value,
+                new=PURGED_VALUE,
+                original_path=(
+                    report.original_path(self.document_path + (field,))
+                    if report is not None
+                    else None
+                ),
+            )
         return mapping
 
     def __normalize_rename_fields(self, mapping, schema):
@@ -907,17 +1065,33 @@ class BareValidator(object):
                 and 'rename_handler' in self.allow_unknown
             ):
                 self._normalize_rename_handler(
-                    mapping, {field: self.allow_unknown}, field
+                    mapping,
+                    {field: self.allow_unknown},
+                    field,
+                    is_unknown=True,
                 )
         return mapping
 
     def _normalize_rename(self, mapping, schema, field):
         """{'type': 'hashable'}"""
         if 'rename' in schema[field]:
-            mapping[schema[field]['rename']] = mapping[field]
+            new_field = schema[field]['rename']
+            value = mapping[field]
+            mapping[new_field] = value
             del mapping[field]
+            self._record_normalization_change(
+                'rename',
+                field,
+                (field, 'rename'),
+                old=field,
+                new=new_field,
+                original_path=self.document_path + (field,),
+                new_path=self.document_path + (new_field,),
+            )
 
-    def _normalize_rename_handler(self, mapping, schema, field):
+    def _normalize_rename_handler(
+        self, mapping, schema, field, is_unknown=False
+    ):
         """
         {'oneof': [
             {'type': 'callable'},
@@ -929,12 +1103,35 @@ class BareValidator(object):
         """
         if 'rename_handler' not in schema[field]:
             return
-        new_name = self.__normalize_coerce(
-            schema[field]['rename_handler'], field, field, False, errors.RENAMING_FAILED
+        new_name, success = self.__normalize_coerce(
+            schema[field]['rename_handler'],
+            field,
+            field,
+            False,
+            errors.RENAMING_FAILED,
         )
-        if new_name != field:
-            mapping[new_name] = mapping[field]
+        if success and new_name != field:
+            value = mapping[field]
+            mapping[new_name] = value
             del mapping[field]
+            schema_crumb = (
+                ('__allow_unknown__', 'rename_handler')
+                if is_unknown and not self.is_child
+                else (
+                    ('allow_unknown', 'rename_handler')
+                    if is_unknown
+                    else (field, 'rename_handler')
+                )
+            )
+            self._record_normalization_change(
+                'rename',
+                field,
+                schema_crumb,
+                old=field,
+                new=new_name,
+                original_path=self.document_path + (field,),
+                new_path=self.document_path + (new_name,),
+            )
 
     def __validate_readonly_fields(self, mapping, schema):
         for field in (
@@ -954,6 +1151,11 @@ class BareValidator(object):
                 and not schema[x].get('nullable', False)
             )  # noqa: W503
         ]
+        self._default_provided_fields = {
+            field
+            for field in empty_fields
+            if field in mapping and mapping[field] is None
+        }
 
         try:
             fields_with_default = [x for x in empty_fields if 'default' in schema[x]]
@@ -989,7 +1191,21 @@ class BareValidator(object):
 
     def _normalize_default(self, mapping, schema, field):
         """{'nullable': True}"""
-        mapping[field] = schema[field]['default']
+        old = (
+            None
+            if field in self._default_provided_fields
+            else UNSET_VALUE
+        )
+        self._default_provided_fields.discard(field)
+        default = schema[field]['default']
+        mapping[field] = default
+        self._record_normalization_change(
+            'default',
+            field,
+            (field, 'default'),
+            old=old,
+            new=default,
+        )
 
     def _normalize_default_setter(self, mapping, schema, field):
         """
@@ -1002,7 +1218,17 @@ class BareValidator(object):
             setter = schema[field]['default_setter']
             if isinstance(setter, _str_type):
                 setter = self.__get_rule_handler('normalize_default_setter', setter)
-            mapping[field] = setter(mapping)
+            default = setter(mapping)
+            mapping[field] = default
+            old = (
+                None
+                if field in self._default_provided_fields
+                else UNSET_VALUE
+            )
+            self._record_normalization_change(
+                'default', field, (field, 'default_setter'), old, default
+            )
+            self._default_provided_fields.discard(field)
 
     # # Validating
 

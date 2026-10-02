@@ -137,3 +137,33 @@ is processed through that chain of coercers.
    {'flag': True}
 
 .. versionadded:: 0.9
+
+Normalization Change Reports
+----------------------------
+Pass ``normalization_report=True`` to a :class:`~cerberus.Validator` to record
+each completed normalization action in execution order. A reusable
+:class:`~cerberus.NormalizationReport` instance may be passed as well. Every
+change contains the document path, original input path, schema path, operation,
+and values before and after the action.
+
+.. doctest::
+
+   >>> v = Validator({'old_name': {'rename': 'name'}, 'count': {'coerce': int}},
+   ...               normalization_report=True)
+   >>> normalized = v.normalized({'old_name': 'thing', 'count': '3'})
+   >>> normalized
+   {'name': 'thing', 'count': 3}
+   >>> [(change.op, change.path, change.new_path) for change in v.normalization_report]
+   [('rename', ('old_name',), ('name',)), ('coerce', ('count',), None)]
+
+Missing values are represented by ``UNSET``, while values that were present and
+then removed are represented by ``PURGED``. A report can be replayed on a copy
+of an input document:
+
+.. doctest::
+
+   >>> v.normalization_report.replay({'old_name': 'thing', 'count': '3'}) == normalized
+   True
+
+If a coercion fails, only actions completed before the failure are recorded.
+Turning reporting off leaves validation errors and return values unchanged.
