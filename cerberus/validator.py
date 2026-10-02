@@ -6,6 +6,8 @@ from datetime import date, datetime
 import re
 from warnings import warn
 
+from cerberus.batch import validate_records
+
 from cerberus import errors
 from cerberus.platform import (
     _int_types,
@@ -1061,6 +1063,55 @@ class BareValidator(object):
             return None
         else:
             return self.document
+
+    def validate_many(
+        self,
+        documents,
+        schema=None,
+        identity=None,
+        references=None,
+        external_ids=None,
+        update=False,
+        normalize=True,
+        **batch_options
+    ):
+        """
+        Validates a sequence of documents and checks references between them after
+        every document has been normalized.
+
+        Identity and reference paths may be strings with dots, tuples, or lists.
+        Composite identities compare components by their normalized type. Reference
+        values may be scalars, mappings, tuples, or lists; external identities are
+        passed as scalars, mappings, or tuples matching the declared identity.
+        """
+        identity = batch_options.get(
+            'identity_fields', batch_options.get('key', identity)
+        )
+        references = batch_options.get('reference_fields', references)
+        external_ids = batch_options.get('external', external_ids)
+        result = validate_records(
+            self,
+            documents,
+            schema=schema,
+            identity=identity,
+            references=references,
+            external_ids=external_ids,
+            update=update,
+            normalize=normalize,
+        )
+        return result.valid, result.errors
+
+    def validated_many(self, *args, **kwargs):
+        """Returns valid normalized batch documents and their errors."""
+        return self.validate_many(*args, **kwargs)
+
+    def validate_batch(self, *args, **kwargs):
+        """Alias for :meth:`validate_many`."""
+        return self.validate_many(*args, **kwargs)
+
+    def validated_batch(self, *args, **kwargs):
+        """Alias for :meth:`validated_many`."""
+        return self.validate_many(*args, **kwargs)
 
     def __validate_unknown_fields(self, field):
         if self.allow_unknown:

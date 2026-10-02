@@ -13,7 +13,8 @@ Validator Class
             require_all, _remaining_rules, root_allow_unknown, root_document,
             root_require_all, root_schema, rules_set_registry, schema,
             schema_error_tree, schema_path, schema_registry, types,
-            types_mapping, _valid_schemas, validate, validated
+            types_mapping, validate, validate_batch, validate_many,
+            validated, validated_batch, validated_many, _valid_schemas
 
 
 Rules Set & Schema Registry
