@@ -272,7 +272,7 @@ class DefinitionSchema(MutableMapping):
         test_schema = {}
         for field, rules in schema.items():
             if isinstance(rules, _str_type):
-                test_schema[field] = rules_set_registry.get(rules, rules)
+                test_schema[field] = self.validator.rules_set_registry.get(rules, rules)
             else:
                 test_rules = {}
                 for rule, constraint in rules.items():
@@ -552,3 +552,60 @@ class RulesSetRegistry(Registry):
 
 
 schema_registry, rules_set_registry = SchemaRegistry(), RulesSetRegistry()
+
+
+def freeze_registries(roots, schema_registry, rules_set_registry):
+    """
+    Collects all definitions from the given registries that are referenced by
+    the given objects and returns new registries that hold a consistent
+    snapshot of these definitions.
+
+    References are *not* resolved by expanding them, thus recursive references
+    are supported and the snapshots are bound by name, just like the original
+    definitions. Definitions that are registered later or replaced in the
+    source registries don't affect the frozen registries.
+
+    References that cannot be found in the source registries are ignored here;
+    they are reported when a schema is validated against the frozen
+    registries.
+
+    :param roots: An iterable of objects (schemas, rules sets, constraints)
+                  that are searched for registry references.
+    :param schema_registry: The :class:`SchemaRegistry` to snapshot schema
+                            definitions from.
+    :param rules_set_registry: The :class:`RulesSetRegistry` to snapshot rules
+                               set definitions from.
+    :return: A two-value :class:`tuple` with a :class:`SchemaRegistry` and a
+             :class:`RulesSetRegistry` that hold the snapshotted definitions.
+    """
+    frozen_schemas, frozen_rules_sets = SchemaRegistry(), RulesSetRegistry()
+    known_schema_refs, known_rules_set_refs = set(), set()
+
+    def snapshot_ref(name):
+        if name not in known_schema_refs:
+            known_schema_refs.add(name)
+            definition = schema_registry.get(name)
+            if definition is not None:
+                frozen_schemas._storage[name] = definition
+                collect_refs(definition)
+        if name not in known_rules_set_refs:
+            known_rules_set_refs.add(name)
+            definition = rules_set_registry.get(name)
+            if definition is not None:
+                frozen_rules_sets._storage[name] = definition
+                collect_refs(definition)
+
+    def collect_refs(obj):
+        if isinstance(obj, _str_type):
+            snapshot_ref(obj)
+        elif isinstance(obj, Mapping):
+            for value in obj.values():
+                collect_refs(value)
+        elif isinstance(obj, Sequence) and not isinstance(obj, _str_type):
+            for item in obj:
+                collect_refs(item)
+
+    for root in roots:
+        collect_refs(root)
+
+    return frozen_schemas, frozen_rules_sets

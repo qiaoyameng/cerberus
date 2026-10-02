@@ -1,6 +1,22 @@
 Cerberus Changelog
 ==================
 
+Unreleased
+----------
+
+New
+~~~
+
+- Add :meth:`cerberus.Validator.frozen` to build validators whose registry
+  references are bound to a consistent snapshot of the registries
+
+Fixed
+~~~~~
+
+- ``DefinitionSchema`` resolves referenced rules sets with the assigned
+  validator's registry instead of the default one
+
+
 Version 1.3.8
 -------------
 

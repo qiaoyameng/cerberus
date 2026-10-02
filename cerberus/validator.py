@@ -22,6 +22,7 @@ from cerberus.schema import (
     rules_set_registry,
     DefinitionSchema,
     SchemaError,
+    freeze_registries,
 )
 from cerberus.utils import drop_item_from_tuple, readonly_classproperty, TypeDefinition
 
@@ -230,6 +231,43 @@ class BareValidator(object):
     def clear_caches(cls):
         """Purge the cache of known valid schemas."""
         cls._valid_schemas.clear()
+
+    @classmethod
+    def frozen(cls, schema=None, **kwargs):
+        """
+        Creates a validator whose references to the schema- and
+        rules-set-registries are bound to a consistent snapshot of these
+        registries' state at the time of the call.
+
+        Later changes to the source registries affect neither a running
+        document processing nor any subsequent one of the returned instance.
+        Recursive references are supported as they are not resolved by
+        expansion. Missing references and invalid rules are reported
+        altogether by a :class:`~cerberus.schema.SchemaError` that is raised
+        when the instance cannot be built; the class' cache of known valid
+        schemas is left untouched in that case.
+
+        :param schema: See :attr:`~cerberus.Validator.schema`.
+        :param kwargs: Further configuration arguments as with the regular
+                       initialization. If ``schema_registry`` and
+                       ``rules_set_registry`` are given, these are used as the
+                       sources that the frozen registries are derived from.
+        :return: An instance of the called class.
+        """
+        frozen_schema_registry, frozen_rules_set_registry = freeze_registries(
+            (schema, kwargs.get('allow_unknown')),
+            kwargs.get('schema_registry', schema_registry),
+            kwargs.get('rules_set_registry', rules_set_registry),
+        )
+        kwargs['schema_registry'] = frozen_schema_registry
+        kwargs['rules_set_registry'] = frozen_rules_set_registry
+        valid_schemas = cls._valid_schemas.copy()
+        try:
+            validator = cls(schema, **kwargs)
+        except Exception:
+            cls._valid_schemas.intersection_update(valid_schemas)
+            raise
+        return validator
 
     def _error(self, *args):
         """

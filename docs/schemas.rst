@@ -55,6 +55,32 @@ Using registries is particularly interesting if
     >>> schema = {'foo': 'booleans'}
 
 
+Freezing registry references
+----------------------------
+
+As references to registry definitions are resolved lazily during a document's
+processing, changes to a registry take effect immediately - even while a
+validation is running. When a validator shall be bound to a consistent
+version of the definitions it depends on, use
+:meth:`~cerberus.Validator.frozen` to build an instance whose references are
+bound to a snapshot of the registries at the time of the call:
+
+.. doctest::
+
+    >>> from cerberus import rules_set_registry
+    >>> rules_set_registry.add('answer', {'type': 'integer'})
+    >>> validator = Validator.frozen({'answer': 'answer'})
+    >>> rules_set_registry.add('answer', {'type': 'string'})
+    >>> validator.validate({'answer': 42})
+    True
+
+The snapshot is taken without expanding references, hence recursive
+definitions are supported. Missing references and invalid rules are reported
+altogether by a :exc:`~cerberus.SchemaError` that is raised when the instance
+cannot be built. Later changes to the source registries don't affect a frozen
+validator, but instances that are frozen afterwards see the new definitions.
+
+
 Validation
 ----------
 
