@@ -28,6 +28,62 @@ from cerberus.utils import drop_item_from_tuple, readonly_classproperty, TypeDef
 toy_error_handler = errors.ToyErrorHandler()
 
 
+class _UniqueKeyError(TypeError):
+    pass
+
+
+class _MissingUniqueKey(object):
+    __slots__ = ()
+
+    def __repr__(self):
+        return '<missing>'
+
+
+_missing_unique_key = _MissingUniqueKey()
+
+
+def _unique_key_component(value):
+    try:
+        hash(value)
+    except TypeError:
+        raise _UniqueKeyError()
+
+    if isinstance(value, bool):
+        return ('__boolean__', value)
+    if isinstance(value, (_int_types, float)):
+        return ('__number__', value)
+    if isinstance(value, tuple):
+        return (
+            '__tuple__',
+            tuple(_unique_key_component(item) for item in value),
+        )
+    if isinstance(value, frozenset):
+        return (
+            '__frozenset__',
+            frozenset(_unique_key_component(item) for item in value),
+        )
+    return value
+
+
+def _lookup_unique_key_path(value, path):
+    for part in path:
+        if isinstance(value, Mapping):
+            if part not in value:
+                return _missing_unique_key
+            value = value[part]
+        elif isinstance(value, Sequence) and not isinstance(value, _str_type):
+            try:
+                index = int(part)
+            except (TypeError, ValueError):
+                return _missing_unique_key
+            if not 0 <= index < len(value):
+                return _missing_unique_key
+            value = value[index]
+        else:
+            return _missing_unique_key
+    return value
+
+
 def dummy_for_rule_validation(rule_constraints):
     def dummy(self, constraint, field, value):
         raise RuntimeError(
@@ -1558,6 +1614,81 @@ class BareValidator(object):
 
         self._error(field, errors.BAD_TYPE)
         self._drop_remaining_rules()
+
+    def _validate_unique_by(self, unique_by, field, values):
+        """
+        {'oneof': [
+            {'type': 'string', 'empty': False},
+            {'type': 'list',
+             'empty': False,
+             'schema': {'type': 'string', 'empty': False}}
+        ]}
+        """
+        if not isinstance(values, Sequence) or isinstance(values, _str_type):
+            return
+
+        if isinstance(unique_by, _str_type):
+            key_paths = (tuple(unique_by.split('.')),)
+        else:
+            key_paths = tuple(tuple(path.split('.')) for path in unique_by)
+
+        first_indexes = {}
+
+        for index, item in enumerate(values):
+            if not isinstance(item, Mapping):
+                continue
+
+            key = []
+            represented_key = []
+            has_unhashable_value = False
+
+            for path in key_paths:
+                component = _lookup_unique_key_path(item, path)
+                if component is _missing_unique_key:
+                    represented_key.append(component)
+                    key.append(component)
+                    continue
+
+                try:
+                    key.append(_unique_key_component(component))
+                except _UniqueKeyError:
+                    has_unhashable_value = True
+                    self._unique_by_error(
+                        field,
+                        index,
+                        errors.UNIQUE_BY_UNHASHABLE,
+                        unique_by,
+                        ('.'.join(path),),
+                    )
+                else:
+                    represented_key.append(component)
+
+            if has_unhashable_value:
+                continue
+
+            key = tuple(key)
+            if key not in first_indexes:
+                first_indexes[key] = index
+                continue
+
+            first_index = first_indexes[key]
+            info = (tuple(represented_key), first_index, index)
+            self._unique_by_error(
+                field, first_index, errors.UNIQUE_BY, unique_by, info
+            )
+            self._unique_by_error(field, index, errors.UNIQUE_BY, unique_by, info)
+
+    def _unique_by_error(self, field, index, definition, constraint, info):
+        error = errors.ValidationError(
+            self.document_path + (field, index),
+            self.schema_path + (field, 'unique_by'),
+            definition.code,
+            definition.rule,
+            constraint,
+            self.document[field][index],
+            info,
+        )
+        self._error([error])
 
     def _validate_valuesrules(self, schema, field, value):
         """

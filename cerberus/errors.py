@@ -55,6 +55,8 @@ UNALLOWED_VALUES = ErrorDefinition(0x45, 'allowed')
 FORBIDDEN_VALUE = ErrorDefinition(0x46, 'forbidden')
 FORBIDDEN_VALUES = ErrorDefinition(0x47, 'forbidden')
 MISSING_MEMBERS = ErrorDefinition(0x48, 'contains')
+UNIQUE_BY = ErrorDefinition(0x49, 'unique_by')
+UNIQUE_BY_UNHASHABLE = ErrorDefinition(0x4A, 'unique_by')
 
 # other
 NORMALIZATION = ErrorDefinition(0x60, None)
@@ -489,6 +491,11 @@ class BasicErrorHandler(BaseErrorHandler):
         0x46: "unallowed value {value}",
         0x47: "unallowed values {0}",
         0x48: "missing members {0}",
+        0x49: (
+            "duplicate unique key {0}; first seen at index {1}, "
+            "conflicting index {2}"
+        ),
+        0x4A: "unhashable value at '{0}' cannot be used as a unique key",
         0x61: "field '{field}' cannot be coerced: {0}",
         0x62: "field '{field}' cannot be renamed: {0}",
         0x63: "field is read-only",

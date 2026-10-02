@@ -916,6 +916,47 @@ A list of types can be used to allow different values:
 
 .. [#] This is actually an alias of :class:`py2:str` in Python 2.
 
+unique_by
+---------
+
+This rule applies to a :class:`list` of :class:`dict` items. Its constraint is
+either one dotted field path or a list of dotted field paths that together form
+the unique key of each item.
+
+Keys are compared after normalization, so two different original values are
+considered duplicates when their coerced values are equal.
+
+.. doctest::
+
+   >>> schema = {'measurements': {
+   ...     'type': 'list',
+   ...     'unique_by': ['station', 'channel'],
+   ...     'schema': {'type': 'dict',
+   ...               'schema': {'station': {'type': 'string', 'coerce': str.lower},
+   ...                          'channel': {'type': 'string', 'coerce': str.upper}}}}}
+   >>> document = {'measurements': [
+   ...     {'station': 'north', 'channel': 'a'},
+   ...     {'station': 'NORTH', 'channel': 'A'}]}
+   >>> v.validate(document, schema)
+   False
+
+For every conflict, Cerberus reports an error at both the index of the first
+occurrence and the index of the later item. The normalized key and both indexes
+are available from the error's ``info`` attribute, allowing multiple
+independent conflict groups to be returned.
+
+A missing nested path is represented by a dedicated missing value. It is
+therefore distinct from an explicit ``None``: two records with the same path
+missing conflict, but a missing value does not conflict with ``None``.
+
+Unhashable key values cannot participate in uniqueness comparison and cause a
+validation error at the containing list item, with the offending field path in
+the error details.
+
+Values are not converted to strings. Additionally, ``True`` and ``1`` are kept
+distinct rather than being treated as duplicates merely because Python considers
+them equal.
+
 .. _valuesrules-rule:
 
 valuesrules

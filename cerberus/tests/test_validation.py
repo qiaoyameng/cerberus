@@ -2018,3 +2018,155 @@ def test_schema_validation_from_rules_set():
     Validator(schema={'a_dict': 'addr'}).validate(
         {'a_dict': {'address': 'my address', 'city': 'my town'}}
     )
+
+
+def test_unique_by_after_coercion():
+    schema = {
+        'readings': {
+            'type': 'list',
+            'unique_by': ['station', 'channel'],
+            'schema': {
+                'type': 'dict',
+                'schema': {
+                    'station': {'type': 'string', 'coerce': str.lower},
+                    'channel': {'type': 'string', 'coerce': str.upper},
+                },
+            },
+        }
+    }
+    document = {
+        'readings': [
+            {'station': 'north', 'channel': 'a'},
+            {'station': 'NORTH', 'channel': 'A'},
+        ]
+    }
+
+    actual_errors = assert_fail(document, schema)
+
+    assert_has_error(
+        actual_errors,
+        ('readings', 0),
+        ('readings', 'unique_by'),
+        errors.UNIQUE_BY,
+        ['station', 'channel'],
+        (('north', 'A'), 0, 1),
+    )
+    assert_has_error(
+        actual_errors,
+        ('readings', 1),
+        ('readings', 'unique_by'),
+        errors.UNIQUE_BY,
+        ['station', 'channel'],
+        (('north', 'A'), 0, 1),
+    )
+    assert actual_errors[0].document_path == ('readings', 0)
+    assert actual_errors[1].document_path == ('readings', 1)
+
+
+def test_unique_by_multiple_conflict_groups():
+    schema = {
+        'readings': {
+            'type': 'list',
+            'unique_by': ['station', 'channel'],
+            'schema': {'type': 'dict'},
+        }
+    }
+    document = {
+        'readings': [
+            {'station': 'north', 'channel': 'a'},
+            {'station': 'south', 'channel': 'b'},
+            {'station': 'north', 'channel': 'a'},
+            {'station': 'south', 'channel': 'b'},
+        ]
+    }
+
+    actual_errors = assert_fail(document, schema)
+
+    assert len(actual_errors) == 4
+    assert [error.document_path for error in actual_errors] == [
+        ('readings', 0),
+        ('readings', 1),
+        ('readings', 2),
+        ('readings', 3),
+    ]
+    assert [error.info[1:] for error in actual_errors] == [
+        (0, 2),
+        (1, 3),
+        (0, 2),
+        (1, 3),
+    ]
+
+
+def test_unique_by_nested_missing_and_none():
+    schema = {
+        'readings': {
+            'type': 'list',
+            'unique_by': ['station.id', 'channel.code'],
+            'schema': {'type': 'dict'},
+        }
+    }
+    document = {
+        'readings': [
+            {'station': {'id': 'north'}, 'channel': {}},
+            {'station': {'id': 'north'}, 'channel': {'code': None}},
+            {'station': {'id': 'north'}, 'channel': {}},
+            {'station': {'id': 'south'}, 'channel': {'code': None}},
+            {'station': {'id': 'south'}, 'channel': {'code': None}},
+        ]
+    }
+
+    actual_errors = assert_fail(document, schema)
+
+    assert [error.document_path for error in actual_errors] == [
+        ('readings', 0),
+        ('readings', 2),
+        ('readings', 3),
+        ('readings', 4),
+    ]
+    assert actual_errors[0].info[0][1] is not actual_errors[2].info[0][1]
+
+
+def test_unique_by_distinguishes_integer_and_boolean():
+    schema = {
+        'readings': {
+            'type': 'list',
+            'unique_by': ['station', 'channel'],
+            'schema': {
+                'type': 'dict',
+                'schema': {
+                    'station': {'type': ['integer', 'boolean']},
+                    'channel': {'type': 'string'},
+                },
+            },
+        }
+    }
+    document = {
+        'readings': [
+            {'station': 1, 'channel': 'a'},
+            {'station': True, 'channel': 'a'},
+        ]
+    }
+
+    assert_success(document, schema)
+
+
+def test_unique_by_reports_unhashable_values():
+    schema = {
+        'readings': {
+            'type': 'list',
+            'unique_by': 'station.id',
+            'schema': {'type': 'dict'},
+        }
+    }
+    document = {'readings': [{'station': {'id': {'value': 1}}}]}
+
+    actual_errors = assert_fail(document, schema)
+
+    assert_has_error(
+        actual_errors,
+        ('readings', 0),
+        ('readings', 'unique_by'),
+        errors.UNIQUE_BY_UNHASHABLE,
+        'station.id',
+        ('station.id',),
+    )
